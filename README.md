@@ -10,18 +10,20 @@ disabled), and posts it — replacing Meltwater's noisy built-in Slack feed.
 - **Streem-style output:** source + icon, bold linked headline, snippet with matched keywords as `code` pills (or a `Mentions: kw (n)` line), and an **Author | Organisation Brief** footer. Slack auto-unfurl is disabled.
 - **Syndication de-dup:** the same wire story across many outlets collapses into one message that lists every outlet (`📡 Also in: …`) — via `chat.update`.
 - **Tuning surface:** `src/config/feed.config.ts` (briefs, keywords, source allow/block, reach, media types)
-- **Persistence (D1):** `webhook_events` (raw + parsed + decision, powers `/inspect`), `seen_mentions` (dedupe), `stories` (syndication tracking)
+- **Persistence (D1):** `webhook_events` (raw + parsed + decision, powers `/inspect`), `seen_mentions` (dedupe), `stories` (syndication tracking), `ops_state` (heartbeat bookkeeping)
 - **Inspect:** `GET /inspect?key=…` — recent events, raw payload, filter decision + reason, Block Kit preview
+- **Monitoring:** `GET /health` validates the runtime config (`configOk`); an hourly cron **heartbeat** alerts Slack if ingestion goes quiet (`src/lib/heartbeat.ts`)
 
 Deferred (not built): RSS-poll fallback and the native REST API path. Print is excluded (no plan credit).
 
 ## Endpoints
 | Route | Auth | Purpose |
 |---|---|---|
-| `GET /health` | none | health/status JSON (no secrets); `/` returns 404 |
+| `GET /health` | none | health/status JSON (no secrets) incl. `configOk`; add `?key=INSPECT_KEY` for the `configIssues` detail; `/` returns 404 |
 | `POST /webhooks/meltwater/:token` | path token = `WEBHOOK_SHARED_SECRET` | receive a Meltwater alert |
 | `GET /inspect?key=…` | `key` = `INSPECT_KEY` | inspection UI |
 | `GET /api/webhooks/recent?key=…` | `key` = `INSPECT_KEY` | recent events as JSON |
+| `GET /admin/heartbeat?key=…` | `key` = `REPLAY_KEY` | run the ingestion-stall check on demand |
 
 ## Local development
 ```bash
@@ -63,6 +65,7 @@ npx wrangler secret put WEBHOOK_SHARED_SECRET   # long random string
 npx wrangler secret put INSPECT_KEY
 npx wrangler secret put SLACK_BOT_TOKEN          # xoxb-… (later)
 npx wrangler secret put SLACK_DEFAULT_CHANNEL    # e.g. C0123ABCD (later)
+npx wrangler secret put REPLAY_KEY               # gates /admin/replay and /admin/heartbeat
 
 pnpm deploy                                      # → https://headwater.<subdomain>.workers.dev
 ```
@@ -105,6 +108,26 @@ for the first real payload, then tighten `src/lib/meltwater/parse.ts` to the act
 2. Create the channel and `/invite` the bot.
 3. `wrangler secret put SLACK_BOT_TOKEN` and `SLACK_DEFAULT_CHANNEL` (the channel id, e.g. `C0123ABCD`).
 4. Set `"POSTING_ENABLED": "true"` in `wrangler.jsonc` and `pnpm deploy`.
+
+## Monitoring
+Two guardrails exist because a webhook-secret mismatch (or a stalled upstream) can silence the feed
+with **no error** — deliveries are rejected before they're ever logged.
+
+- **Config validation** — `GET /health` returns `configOk`, a *format* check of the runtime env:
+  bare tokens vs a pasted URL (the classic footgun: putting the whole webhook URL in
+  `WEBHOOK_SHARED_SECRET` instead of just the path token), an `xoxb-` bot token, a channel id or
+  `#name`, and `POSTING_ENABLED` being exactly `"true"`/`"false"`. It never leaks values; the
+  detailed `configIssues` list is returned only with `?key=INSPECT_KEY`. (This catches *malformed*
+  config, not a well-formed-but-wrong value — that's what the heartbeat is for.)
+- **Ingestion heartbeat** — an hourly cron (`triggers.crons` in `wrangler.jsonc` → `scheduled()` in
+  `src/index.ts` → `src/lib/heartbeat.ts`) checks the newest `webhook_events` row and posts a Slack
+  alert if nothing has arrived within `HEARTBEAT_MAX_SILENCE_HOURS` (default 3). It de-dupes via the
+  `ops_state` table so a persistent stall pages at most once per `HEARTBEAT_REALERT_HOURS`
+  (default 6) and re-arms once ingestion recovers. Trigger it on demand at
+  `GET /admin/heartbeat?key=<REPLAY_KEY>`.
+  - Optional tunables (non-secret — set in `wrangler.jsonc` `vars`, or as secrets):
+    `HEARTBEAT_MAX_SILENCE_HOURS`, `HEARTBEAT_REALERT_HOURS`, and `SLACK_ALERT_CHANNEL`
+    (the alert channel; defaults to `SLACK_DEFAULT_CHANNEL`).
 
 ## Security & privacy
 - **No secrets in the repo.** Real secrets live only in `.dev.vars` (gitignored) and Cloudflare

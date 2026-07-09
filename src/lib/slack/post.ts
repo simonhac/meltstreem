@@ -55,6 +55,12 @@ export async function postToSlack(env: Env, payload: SlackPostPayload): Promise<
   return slackCall(env.SLACK_BOT_TOKEN, "chat.postMessage", payload);
 }
 
+/** Post a plain-text message (used by the ingestion heartbeat alert — no card/attachment). */
+export async function postText(env: Env, channel: string, text: string): Promise<SlackResult> {
+  if (!env.SLACK_BOT_TOKEN) return { ok: false, error: "no_slack_token" };
+  return slackCall(env.SLACK_BOT_TOKEN, "chat.postMessage", { channel, text, unfurl_links: false, unfurl_media: false });
+}
+
 /** Delete a message (used by the admin replay to clear old cards before a clean backfill). */
 export async function deleteSlack(env: Env, channel: string, ts: string): Promise<SlackResult> {
   if (!env.SLACK_BOT_TOKEN) return { ok: false, error: "no_slack_token" };

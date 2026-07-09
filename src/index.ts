@@ -6,6 +6,8 @@ import { processEvent } from "@/lib/process";
 import { replayArchivedEvents } from "@/lib/replay";
 import { eventId, timingSafeEqualStr } from "@/lib/ids";
 import { renderInspectPage } from "@/ui/inspect";
+import { validateConfig, summarizeConfig } from "@/lib/config/validate";
+import { runHeartbeat } from "@/lib/heartbeat";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -24,11 +26,17 @@ app.get("/health", async (c) => {
   } catch {
     /* DB not migrated yet */
   }
+  // Format-validate the runtime env (never leaks values). `configOk` is public; the detailed
+  // issue list (still value-free) is gated behind the inspect key.
+  const config = summarizeConfig(validateConfig(c.env));
+  const showConfigDetail = checkKey(c.req.query("key"), c.env.INSPECT_KEY) === "ok";
   return c.json({
     service: "headwater",
-    build: "headwater-2", // bump on each deploy to confirm the running code
+    build: "headwater-3", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
+    configOk: config.ok,
+    ...(showConfigDetail ? { configIssues: config.issues } : {}),
     configured: {
       webhookSecret: !!c.env.WEBHOOK_SHARED_SECRET,
       inspectKey: !!c.env.INSPECT_KEY,
@@ -108,6 +116,14 @@ app.post("/admin/replay", async (c) => {
   }
 });
 
+// --- admin: run the ingestion heartbeat on demand (same check the cron runs); gated by REPLAY_KEY ---
+app.get("/admin/heartbeat", async (c) => {
+  const gate = checkKey(c.req.query("key"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  return c.json(await runHeartbeat(c.env, Date.now()));
+});
+
 app.get("/inspect", async (c) => {
   const key = c.req.query("key");
   const gate = checkKey(key, c.env.INSPECT_KEY);
@@ -124,4 +140,11 @@ app.get("/inspect", async (c) => {
   );
 });
 
-export default app;
+// Cron trigger (wrangler.jsonc `triggers.crons`): the ingestion heartbeat. Never throw out of
+// scheduled() — a rejected cron just retries noisily; the check self-reports via its return value.
+export default {
+  fetch: app.fetch,
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    ctx.waitUntil(runHeartbeat(env, Date.now()).catch(() => {}));
+  },
+} satisfies ExportedHandler<Env>;

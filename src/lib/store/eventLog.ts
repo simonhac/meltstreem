@@ -100,6 +100,12 @@ export class EventLog {
     return res.results ?? [];
   }
 
+  /** Epoch-ms of the most recent inbound webhook, or null if none logged yet (backs the heartbeat). */
+  async latestReceivedAt(): Promise<number | null> {
+    const row = await this.db.prepare(`SELECT MAX(received_at) AS m FROM webhook_events`).first<{ m: number | null }>();
+    return row?.m ?? null;
+  }
+
   async get(id: string): Promise<WebhookEventRecord | null> {
     return await this.db
       .prepare(`SELECT * FROM webhook_events WHERE id = ?`)
