@@ -17,4 +17,12 @@ export interface Env {
   SLACK_DEFAULT_CHANNEL?: string;
   /** Query-key guarding POST /admin/replay (reparse + repost archived events). */
   REPLAY_KEY?: string;
+
+  // --- ingestion heartbeat (all optional; sensible defaults in src/lib/heartbeat.ts) ---
+  /** Alert if no webhook has arrived in this many hours (default 3). */
+  HEARTBEAT_MAX_SILENCE_HOURS?: string;
+  /** While a stall persists, re-alert at most once per this many hours (default 6). */
+  HEARTBEAT_REALERT_HOURS?: string;
+  /** Channel for heartbeat alerts; falls back to SLACK_DEFAULT_CHANNEL. */
+  SLACK_ALERT_CHANNEL?: string;
 }
