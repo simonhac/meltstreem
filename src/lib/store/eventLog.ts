@@ -100,9 +100,14 @@ export class EventLog {
     return res.results ?? [];
   }
 
-  /** Epoch-ms of the most recent inbound webhook, or null if none logged yet (backs the heartbeat). */
-  async latestReceivedAt(): Promise<number | null> {
-    const row = await this.db.prepare(`SELECT MAX(received_at) AS m FROM webhook_events`).first<{ m: number | null }>();
+  /** Epoch-ms of the most recent inbound webhook that parsed into a real mention (its `source`
+   *  is populated only once the pipeline processes a mention). Backs the heartbeat: unlike a raw
+   *  MAX(received_at) this ignores non-mention POSTs — empty-body probes, health pings, malformed
+   *  bodies — so they can't reset the ingestion-stall clock and mask a genuine upstream outage. */
+  async latestMentionReceivedAt(): Promise<number | null> {
+    const row = await this.db
+      .prepare(`SELECT MAX(received_at) AS m FROM webhook_events WHERE source IS NOT NULL`)
+      .first<{ m: number | null }>();
     return row?.m ?? null;
   }
 

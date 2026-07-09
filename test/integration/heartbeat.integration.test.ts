@@ -6,10 +6,20 @@ import { OpsState } from "@/lib/store/opsState";
 const H = 60 * 60 * 1000;
 const NOW = 1_783_600_000_000;
 
-// Insert a bare webhook_events row with a chosen receipt time (only received_at matters here).
+// A processed real mention: `source` is populated, so the heartbeat counts it as ingestion.
 async function logEventAt(receivedAt: number, id = `hb-${receivedAt}`) {
   await env.DB.prepare(
-    `INSERT INTO webhook_events (id, received_at, raw_json, decision, posted) VALUES (?, ?, '{}', 'logged', 0)`,
+    `INSERT INTO webhook_events (id, received_at, source, raw_json, decision, posted) VALUES (?, ?, 'Test Outlet', '{}', 'logged', 0)`,
+  )
+    .bind(id, receivedAt)
+    .run();
+}
+
+// A non-mention POST (empty-body probe / health ping): logged with no source. Must NOT count as
+// ingestion — otherwise it would reset the stall clock and mask a genuine upstream outage.
+async function logProbeAt(receivedAt: number, id = `probe-${receivedAt}`) {
+  await env.DB.prepare(
+    `INSERT INTO webhook_events (id, received_at, raw_json, decision, posted) VALUES (?, ?, '', 'error', 0)`,
   )
     .bind(id, receivedAt)
     .run();
@@ -40,6 +50,17 @@ describe("runHeartbeat (real D1 + mocked Slack)", () => {
     expect(r.healthy).toBe(true);
     expect(r.alerted).toBe(false);
     expect(posted()).toHaveLength(0);
+  });
+
+  it("ignores non-mention POSTs — a recent empty-body probe does not mask a real stall", async () => {
+    await logEventAt(NOW - 5 * H); // last real mention 5h ago → stalled
+    await logProbeAt(NOW - 0.5 * H); // a probe 30m ago must NOT reset the clock
+    const r = await runHeartbeat(env, NOW);
+    expect(r.healthy).toBe(false);
+    expect(r.alerted).toBe(true);
+    expect(r.ageHours).toBeCloseTo(5); // measured from the last real mention, not the probe
+    expect(r.latestMentionAt).toBe(NOW - 5 * H);
+    expect(posted()).toHaveLength(1);
   });
 
   it("alerts once on a stall and records the marker, then suppresses within the window", async () => {
