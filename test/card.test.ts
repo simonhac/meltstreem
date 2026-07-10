@@ -82,6 +82,27 @@ describe("renderCardBody", () => {
     expect(html).not.toContain("javascript:");
   });
 
+  it("hyperlinks the masthead when author_link is set (collapsed broadcast card)", () => {
+    // No separate title line; the station heading itself is the link.
+    const html = renderCardBody({
+      color: "#868e96",
+      fallback: "Triple M Gippsland 94.3 & 97.9",
+      author_icon: "https://www.google.com/s2/favicons?sz=64&domain=mlt.example",
+      author_name: "Triple M Gippsland 94.3 & 97.9",
+      author_link: "https://mlt.example/track",
+      mrkdwn_in: [],
+    });
+    expect(html).toContain('<a class="att-masthead sr-link" href="https://mlt.example/track"');
+    expect(html).toContain("Triple M Gippsland 94.3 &amp; 97.9</a>");
+    expect(html).not.toContain('class="att-title'); // the duplicate title line is gone
+  });
+
+  it("keeps the masthead a plain span when author_link is unsafe", () => {
+    const html = renderCardBody({ ...att, author_link: "javascript:alert(1)", title: undefined, title_link: undefined });
+    expect(html).toContain('<span class="att-masthead">The Australian</span>');
+    expect(html).not.toContain("javascript:");
+  });
+
   it("omits logo, text, fields and footer when absent", () => {
     const html = renderCardBody({
       color: "#868e96",

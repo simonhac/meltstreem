@@ -68,8 +68,11 @@ export function renderCardBody(att: SlackAttachment): string {
   const logoImg = logo
     ? `<img class="att-logo" src="${logo}" alt="" loading="lazy" referrerpolicy="no-referrer">`
     : "";
+  const mastheadHref = safeUrl(att.author_link);
   const masthead = att.author_name
-    ? `<span class="att-masthead">${escHtml(att.author_name)}</span>`
+    ? mastheadHref
+      ? `<a class="att-masthead sr-link" href="${mastheadHref}" target="_blank" rel="noopener noreferrer">${escHtml(att.author_name)}</a>`
+      : `<span class="att-masthead">${escHtml(att.author_name)}</span>`
     : "";
   const head = logoImg || masthead ? `<div class="att-head">${logoImg}${masthead}</div>` : "";
 

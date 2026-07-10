@@ -22,6 +22,8 @@ export interface SlackAttachment {
   fallback: string;
   author_name?: string;
   author_icon?: string;
+  /** Hyperlinks the author_name (the masthead) — set only when the title just repeats the masthead. */
+  author_link?: string;
   title?: string;
   title_link?: string;
   text?: string;
@@ -155,6 +157,12 @@ export function briefColor(brief: BriefRule): string {
   return brief.color ?? DEFAULT_BRIEF_COLOR;
 }
 
+/** Case- and whitespace-insensitive equality — for spotting a title that just repeats the masthead. */
+export function sameText(a: string, b: string): boolean {
+  const norm = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+  return norm(a) === norm(b);
+}
+
 /**
  * Build the Streem-style classic attachment for one mention. `otherOutlets` are additional outlets
  * that carried the same (syndicated) story; `otherBriefLabels` are the non-primary Organisation
@@ -171,6 +179,11 @@ export function buildAttachment(
   const kws = keywordsFor(m, brief);
   const masthead = m.sourceName ?? "Unknown source";
   const title = cleanTitle(m.title) ?? m.url ?? "(untitled)";
+
+  // For broadcast the program label IS the station name, so the title just repeats the masthead
+  // heading (e.g. "Triple M Gippsland 94.3 & 97.9" twice). When they match, don't print it twice:
+  // drop the separate title line and hyperlink the heading itself via `author_link` instead.
+  const titleRepeatsMasthead = sameText(title, masthead);
 
   // body: when there's a snippet, always show it (keywords highlighted as pills) and append an
   // "(also mentions `kw` …)" suffix listing every Meltwater-matched keyword NOT already visible in the
@@ -236,14 +249,19 @@ export function buildAttachment(
   const logo = sourceLogoUrl(m.sourceName, m.outletUrl ?? m.url);
   const att: SlackAttachment = {
     color: briefColor(brief),
-    fallback: `${masthead}: ${title}`,
+    fallback: titleRepeatsMasthead ? masthead : `${masthead}: ${title}`,
     author_name: logo ? masthead : `${mediaTypeEmoji(m.mediaType)} ${masthead}`,
-    title,
+    // Keep `title` in its original position for the common (non-repeat) case so the attachment hash
+    // of every existing card stays stable — only the collapsed broadcast cards should re-render.
+    ...(titleRepeatsMasthead ? {} : { title }),
     fields,
     mrkdwn_in: ["text", "fields"],
   };
   if (logo) att.author_icon = logo;
-  if (m.url) att.title_link = m.url;
+  if (m.url) {
+    if (titleRepeatsMasthead) att.author_link = m.url; // link the heading instead of the dropped title
+    else att.title_link = m.url;
+  }
   if (text) att.text = text;
   if (footerBits.length) att.footer = footerBits.join("  ·  ");
   return att;

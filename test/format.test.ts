@@ -102,6 +102,72 @@ describe("buildAttachment — title & title_link", () => {
   });
 });
 
+describe("buildAttachment — collapse a title that just repeats the masthead", () => {
+  it("drops title/title_link and links the heading when the title equals the station name", () => {
+    // Real radio case: the program label IS the station name, so both lines read identically.
+    const a = buildAttachment(
+      mention({
+        sourceName: "Triple M Gippsland 94.3 & 97.9",
+        title: "Triple M Gippsland 94.3 & 97.9",
+        url: "https://mlt.example/track",
+        mediaType: "radio",
+      }),
+      brief,
+    );
+    expect(a.title).toBeUndefined();
+    expect(a.title_link).toBeUndefined();
+    expect(a.author_link).toBe("https://mlt.example/track");
+    expect(a.author_name).toContain("Triple M Gippsland 94.3 & 97.9");
+    expect(a.fallback).toBe("Triple M Gippsland 94.3 & 97.9"); // not "X: X"
+  });
+
+  it("collapses across case and whitespace differences (independent sources)", () => {
+    const a = buildAttachment(
+      mention({ sourceName: "702 ABC Sydney", title: "702  abc   SYDNEY", url: "https://mlt.example/x", mediaType: "radio" }),
+      brief,
+    );
+    expect(a.title).toBeUndefined();
+    expect(a.author_link).toBe("https://mlt.example/x");
+  });
+
+  it("collapses after the broadcast air-time tail is stripped, and still uses it for the footer date", () => {
+    const a = buildAttachment(
+      mention({
+        sourceName: "Triple M Goulburn Valley 95.3",
+        title: "Triple M Goulburn Valley 95.3 - Sat, 11 Jul 2026 00:04:00 +1000",
+        url: "https://mlt.example/y",
+        mediaType: "radio",
+        publishedAt: null,
+      }),
+      brief,
+    );
+    expect(a.title).toBeUndefined();
+    expect(a.title_link).toBeUndefined();
+    expect(a.author_link).toBe("https://mlt.example/y");
+    expect(a.footer).toContain("Sat, 11 Jul 2026, 12:04am AEST");
+  });
+
+  it("drops the repeated title even with no url, leaving the heading unlinked", () => {
+    const a = buildAttachment(
+      mention({ sourceName: "Radio Nowhere", title: "Radio Nowhere", url: null, outletUrl: null, mediaType: "radio" }),
+      brief,
+    );
+    expect(a.title).toBeUndefined();
+    expect(a.author_link).toBeUndefined();
+    expect(a.author_name).toContain("Radio Nowhere");
+  });
+
+  it("keeps the separate blue title link when the title differs from the masthead", () => {
+    const a = buildAttachment(
+      mention({ sourceName: "The Australian", title: "Big renewable news", url: "https://x.example/a" }),
+      brief,
+    );
+    expect(a.title).toBe("Big renewable news");
+    expect(a.title_link).toBe("https://x.example/a");
+    expect(a.author_link).toBeUndefined();
+  });
+});
+
 describe("buildAttachment — fields (Author | Organisation Brief)", () => {
   it("includes an Author field when author is present", () => {
     const a = buildAttachment(mention({ author: "Judith Sloan" }), brief);
