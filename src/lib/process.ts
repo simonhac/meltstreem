@@ -4,12 +4,12 @@ import { EventLog } from "@/lib/store/eventLog";
 import { SeenStore } from "@/lib/store/seen";
 import { parseWebhookPayload } from "@/lib/meltwater/parse";
 import { applyFilters, resolveBrief } from "@/lib/filter/engine";
-import { buildAttachment, buildPostPayload } from "@/lib/slack/format";
+import { buildAttachment, buildPostPayload, attachmentHash } from "@/lib/slack/format";
 import { postToSlack, updateSlack } from "@/lib/slack/post";
-import { StoryStore, storyKey, addOutlet, addBriefLabel, type Outlet, type StoryRow } from "@/lib/story";
+import { StoryStore, storyKey, addOutlet, addBriefLabel, otherOutlets, type Outlet, type StoryRow } from "@/lib/story";
 import { feedConfig } from "@/config/feed.config";
 import { simhash64, hammingDistance } from "@/lib/simhash";
-import { resolveStationName } from "@/lib/meltwater/station-resolve";
+import { resolveStationNameLive } from "@/lib/meltwater/station-resolve";
 import { decide } from "@/lib/decide";
 import { sha256Hex } from "@/lib/ids";
 
@@ -51,12 +51,6 @@ const outletOf = (m: NormalizedMention): Outlet => ({
   url: m.url,
   reach: m.reach,
 });
-
-/** Outlets other than the headlined (primary) one. */
-function otherOutlets(outlets: Outlet[], primary: NormalizedMention): Outlet[] {
-  const primName = (primary.sourceName ?? "").toLowerCase();
-  return outlets.filter((o) => o.url !== primary.url && o.name.toLowerCase() !== primName);
-}
 
 /** Closest recent broadcast story whose transcript SimHash is within the configured Hamming distance. */
 async function findNearDup(stories: StoryStore, fp: bigint, now: number): Promise<StoryRow | null> {
@@ -111,7 +105,7 @@ export async function processEvent(
     // Broadcast: the station name isn't in the payload — resolve it (cached) and prefer it as the
     // outlet, demoting any reporter in `sourceName` to the byline.
     if (isBroadcast(mention.mediaType)) {
-      const station = await resolveStationName(env, mention.raw);
+      const station = await resolveStationNameLive(env, mention.raw, now);
       if (station && station.toLowerCase() !== (mention.sourceName ?? "").toLowerCase()) {
         if (!mention.author && mention.sourceName) mention.author = mention.sourceName;
         mention.sourceName = station;
@@ -157,12 +151,9 @@ export async function processEvent(
       const briefLabels = addBriefLabel(JSON.parse(existing.brief_labels_json || "[]") as string[], brief.label);
       const primary = JSON.parse(existing.primary_mention_json) as NormalizedMention;
       const primaryBrief = resolveBrief(primary, feedConfig);
-      const upd = await updateSlack(env, {
-        channel: existing.channel,
-        ts: existing.slack_ts,
-        attachments: [buildAttachment(primary, primaryBrief, otherOutlets(outlets, primary), briefLabels.slice(1), existing.created_at)],
-      });
-      if (upd.ok) await stories.updateOutlets(existing.story_key, outlets, briefLabels, now);
+      const mergedCard = buildAttachment(primary, primaryBrief, otherOutlets(outlets, primary), briefLabels.slice(1), existing.created_at);
+      const upd = await updateSlack(env, { channel: existing.channel, ts: existing.slack_ts, attachments: [mergedCard] });
+      if (upd.ok) await stories.updateOutlets(existing.story_key, outlets, briefLabels, attachmentHash(mergedCard), now);
       await seen.add(dedupeKey, mention.url ?? "", now);
       merged++;
       results.push({
@@ -187,6 +178,7 @@ export async function processEvent(
           outlets: [outletOf(mention)],
           simhash: simhashStr,
           mediaType: mention.mediaType,
+          renderHash: attachmentHash(blocks), // `blocks` is the attachment we just posted (buildPostPayload)
           now,
         });
       }

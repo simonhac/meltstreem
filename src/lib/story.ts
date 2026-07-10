@@ -18,6 +18,8 @@ export interface StoryRow {
   /** Decimal string of the transcript's 64-bit SimHash (null for non-broadcast / too-short text). */
   simhash: string | null;
   media_type: string | null;
+  /** Hash of the rendered card last sent to Slack; lets the redecode backfill skip unchanged cards. */
+  render_hash: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -49,6 +51,12 @@ export function addBriefLabel(labels: string[], label: string): string[] {
   return [...labels, label];
 }
 
+/** Outlets other than the headlined (primary) one — matched by url first, then name (case-insensitive). */
+export function otherOutlets(outlets: Outlet[], primary: { sourceName: string | null; url: string | null }): Outlet[] {
+  const primName = (primary.sourceName ?? "").toLowerCase();
+  return outlets.filter((o) => o.url !== primary.url && o.name.toLowerCase() !== primName);
+}
+
 export class StoryStore {
   constructor(private db: D1Database) {}
 
@@ -70,19 +78,20 @@ export class StoryStore {
     outlets: Outlet[];
     simhash: string | null;
     mediaType: string | null;
+    renderHash: string | null;
     now: number;
   }): Promise<void> {
     await this.db
       .prepare(
         `INSERT INTO stories
            (story_key, slack_ts, channel, brief_label, primary_mention_json, outlets_json,
-            brief_labels_json, simhash, media_type, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            brief_labels_json, simhash, media_type, render_hash, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(story_key) DO UPDATE SET
            slack_ts=excluded.slack_ts, channel=excluded.channel, brief_label=excluded.brief_label,
            primary_mention_json=excluded.primary_mention_json, outlets_json=excluded.outlets_json,
            brief_labels_json=excluded.brief_labels_json, simhash=excluded.simhash, media_type=excluded.media_type,
-           created_at=excluded.created_at, updated_at=excluded.updated_at`,
+           render_hash=excluded.render_hash, created_at=excluded.created_at, updated_at=excluded.updated_at`,
       )
       .bind(
         row.key,
@@ -94,17 +103,18 @@ export class StoryStore {
         JSON.stringify(row.briefLabels),
         row.simhash,
         row.mediaType,
+        row.renderHash,
         row.now,
         row.now,
       )
       .run();
   }
 
-  /** Update the outlet list and matched-brief set after folding in another mention. */
-  async updateOutlets(key: string, outlets: Outlet[], briefLabels: string[], now: number): Promise<void> {
+  /** Update the outlet list and matched-brief set (and the card's render hash) after folding in a mention. */
+  async updateOutlets(key: string, outlets: Outlet[], briefLabels: string[], renderHash: string | null, now: number): Promise<void> {
     await this.db
-      .prepare(`UPDATE stories SET outlets_json = ?, brief_labels_json = ?, updated_at = ? WHERE story_key = ?`)
-      .bind(JSON.stringify(outlets), JSON.stringify(briefLabels), now, key)
+      .prepare(`UPDATE stories SET outlets_json = ?, brief_labels_json = ?, render_hash = ?, updated_at = ? WHERE story_key = ?`)
+      .bind(JSON.stringify(outlets), JSON.stringify(briefLabels), renderHash, now, key)
       .run();
   }
 
@@ -115,5 +125,22 @@ export class StoryStore {
       .bind(sinceMs)
       .all<StoryRow>();
     return res.results ?? [];
+  }
+
+  /** Stories touched within the window (oldest-first for stable output); backs the redecode backfill. */
+  async updatedSince(sinceMs: number): Promise<StoryRow[]> {
+    const res = await this.db
+      .prepare(`SELECT * FROM stories WHERE updated_at >= ? ORDER BY updated_at ASC`)
+      .bind(sinceMs)
+      .all<StoryRow>();
+    return res.results ?? [];
+  }
+
+  /** After a re-decode+chat.update: store the corrected snapshot + new render hash; recency untouched. */
+  async updateRenderState(key: string, primary: unknown, renderHash: string): Promise<void> {
+    await this.db
+      .prepare(`UPDATE stories SET primary_mention_json = ?, render_hash = ? WHERE story_key = ?`)
+      .bind(JSON.stringify(primary), renderHash, key)
+      .run();
   }
 }

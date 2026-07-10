@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { parseWebhookPayload } from "@/lib/meltwater/parse";
-import { mastheadForDomain, hostnameOf } from "@/lib/meltwater/outlets";
+import { mastheadForDomain, hostnameOf, deriveOutletName, looksLikePerson } from "@/lib/meltwater/outlets";
 import { docIdFromLinks } from "@/lib/meltwater/station-resolve";
 import type { NormalizedMention } from "@/lib/meltwater/types";
 
@@ -135,34 +135,46 @@ describe("parseWebhookPayload — Every Mention outlet vs byline resolution", ()
     expect(m!.author).toBeNull();
   });
 
-  it("when the domain is unknown, sourceName falls back to authorName and author is null", () => {
+  it("recovers the outlet from an unmapped publisher domain and demotes authorName to the byline", () => {
     const [m] = parseWebhookPayload({
       providerType: "online_news",
       statusLine: "🔊 10k Reach",
       source: "MPs",
-      authorName: "Some Local Rag",
+      authorName: "Jane Reporter",
       links: {
-        article: trackingUrl("https://www.unknown-outlet.example/a"),
-        source: trackingUrl("https://www.unknown-outlet.example/"),
+        article: trackingUrl("https://www.some-local-news.com.au/a"),
+        source: trackingUrl("https://www.some-local-news.com.au/"),
       },
     });
-    expect(m!.sourceName).toBe("Some Local Rag");
-    expect(m!.author).toBeNull(); // no masthead → nothing to promote a byline against
+    expect(m!.sourceName).toBe("Some Local News"); // derived from the domain, not in the table
+    expect(m!.author).toBe("Jane Reporter"); // byline moved to the Author field
+  });
+
+  it("keeps authorName as the header when it names an unmapped domain (outlet, not a byline)", () => {
+    // bendigoadvertiser.com.au isn't in the table, but authorName IS the outlet — don't demote it to
+    // a byline or show a mangled domain-derived header.
+    const [m] = parseWebhookPayload({
+      providerType: "online_news",
+      statusLine: "🔊 10k Reach",
+      source: "MPs",
+      authorName: "Bendigo Advertiser",
+      links: { source: trackingUrl("https://www.bendigoadvertiser.com.au/") },
+    });
+    expect(m!.sourceName).toBe("Bendigo Advertiser");
+    expect(m!.author).toBeNull();
   });
 
   it("strips trailing '(Print version)' and '(Licensed by Copyright Agency)' cruft from authorName", () => {
-    // Unknown domain so sourceName IS the cleaned authorName (masthead path would replace it).
+    // No publisher host → status quo: sourceName IS the cleaned authorName.
     const [m] = parseWebhookPayload({
       providerType: "print",
       statusLine: "🔊 10k Reach",
       source: "MPs",
       authorName: "Jane Doe (Print version) (Licensed by Copyright Agency)",
-      links: {
-        article: trackingUrl("https://www.unknown-outlet.example/a"),
-        source: trackingUrl("https://www.unknown-outlet.example/"),
-      },
+      links: {},
     });
     expect(m!.sourceName).toBe("Jane Doe");
+    expect(m!.author).toBeNull();
   });
 
   it("promotes the byline to author when domain masthead differs from authorName", () => {
@@ -194,6 +206,140 @@ describe("parseWebhookPayload — Every Mention outlet vs byline resolution", ()
     expect(m!.mediaType).toBe("tv");
     expect(m!.reach).toBe(2500000);
     expect(m!.sourceName).toBe("The Age");
+  });
+});
+
+describe("deriveOutletName (outlets.ts)", () => {
+  it("title-cases a hyphenated domain into a multi-word name", () => {
+    expect(deriveOutletName("some-local-news.com.au")).toBe("Some Local News");
+  });
+
+  it("handles a single-label domain", () => {
+    expect(deriveOutletName("nine.com.au")).toBe("Nine");
+  });
+
+  it("drops a generic leading subdomain and returns null for garbage", () => {
+    expect(deriveOutletName("www.crikey.com.au")).toBe("Crikey");
+    expect(deriveOutletName(null)).toBeNull();
+    expect(deriveOutletName("")).toBeNull();
+  });
+});
+
+describe("looksLikePerson (outlets.ts)", () => {
+  it("accepts 2–3 capitalised words with no outlet word (incl. O'/hyphenated surnames)", () => {
+    expect(looksLikePerson("Jorge Branco")).toBe(true);
+    expect(looksLikePerson("Lucinda Garbutt-Young")).toBe(true);
+    expect(looksLikePerson("Jim O'Rourke")).toBe(true);
+  });
+
+  it("rejects masthead-like names (outlet words, 'The', 4+ words, all-caps)", () => {
+    expect(looksLikePerson("Chelsea Mordialloc Mentone News")).toBe(false); // 4 words + 'News'
+    expect(looksLikePerson("The Sentinel")).toBe(false); // leading 'The'
+    expect(looksLikePerson("News of the Midlands")).toBe(false);
+    expect(looksLikePerson("ABC")).toBe(false); // single all-caps token
+    expect(looksLikePerson("Transparency International Australia")).toBe(false); // 'Australia'
+    expect(looksLikePerson(null)).toBe(false);
+  });
+});
+
+describe("parseWebhookPayload — outlet recovery from the publisher domain (real cases)", () => {
+  // These mirror three production items where authorName is the journalist, not the outlet.
+  it("maps nine.com.au → 9News, moving the reporter to Author", () => {
+    const [m] = parseWebhookPayload({
+      providerType: "news",
+      statusLine: "😐 8M Reach — 😐 Neutral Sentiment",
+      source: "MPs",
+      authorName: "Jorge Branco",
+      links: {
+        source: trackingUrl("https://www.nine.com.au/"),
+        article: trackingUrl("https://transition.meltwater.com/paywall/redirect/abc?productType=alerts"),
+      },
+    });
+    expect(m!.sourceName).toBe("9News");
+    expect(m!.author).toBe("Jorge Branco");
+  });
+
+  it("maps ajn.timesofisrael.com → The Australian Jewish News", () => {
+    const [m] = parseWebhookPayload({
+      providerType: "news",
+      statusLine: "👍 192k Reach",
+      source: "MPs",
+      authorName: "Gareth Narunsky",
+      links: {
+        source: trackingUrl("https://ajn.timesofisrael.com/"),
+        article: trackingUrl("https://app.meltwater.com/shareddocumentviewer/v2/xyz"),
+      },
+    });
+    expect(m!.sourceName).toBe("The Australian Jewish News");
+    expect(m!.author).toBe("Gareth Narunsky");
+  });
+
+  it("keeps a masthead-like authorName instead of deriving an ugly name from the domain", () => {
+    // baysidenews.com.au isn't in the table; authorName is a masthead, not a person → keep it as-is
+    // (regression from the dry-run: "Chelsea Mordialloc Mentone News" was mangled to "Baysidenews").
+    const [m] = parseWebhookPayload({
+      providerType: "news",
+      statusLine: "😐 5k Reach",
+      source: "MPs",
+      authorName: "Chelsea Mordialloc Mentone News",
+      links: { source: trackingUrl("https://www.baysidenews.com.au/a") },
+    });
+    expect(m!.sourceName).toBe("Chelsea Mordialloc Mentone News");
+    expect(m!.author).toBeNull();
+  });
+
+  it("maps a journalist byline on a newly-listed masthead (themercury.com.au → The Mercury)", () => {
+    const [m] = parseWebhookPayload({
+      providerType: "news",
+      statusLine: "😐 200k Reach",
+      source: "MPs",
+      authorName: "Jared Lynch",
+      links: { source: trackingUrl("https://www.themercury.com.au/a") },
+    });
+    expect(m!.sourceName).toBe("The Mercury");
+    expect(m!.author).toBe("Jared Lynch");
+  });
+
+  it("labels a party media release from liberal.org.au", () => {
+    const [m] = parseWebhookPayload({
+      providerType: "news",
+      statusLine: "😐 10k Reach",
+      source: "MPs",
+      authorName: "Angus Taylor",
+      links: { source: trackingUrl("https://www.liberal.org.au/a") },
+    });
+    expect(m!.sourceName).toBe("Liberal Party Media Release");
+    expect(m!.author).toBe("Angus Taylor");
+  });
+
+  it("falls back to the article link's domain when links.source is a Meltwater host", () => {
+    const [m] = parseWebhookPayload({
+      providerType: "news",
+      statusLine: "👎 1.7k Reach — 😔 Negative Sentiment",
+      source: "Teals",
+      authorName: "Tess Ikonomou",
+      links: {
+        source: trackingUrl("https://app.meltwater.com/x"),
+        article: trackingUrl("https://www.australianconveyancer.com.au/article/column-of-smoke/"),
+      },
+    });
+    expect(m!.sourceName).toBe("Australian Conveyancer");
+    expect(m!.author).toBe("Tess Ikonomou");
+  });
+
+  it("keeps authorName as the header when only Meltwater hosts are present (status quo)", () => {
+    const [m] = parseWebhookPayload({
+      providerType: "news",
+      statusLine: "😐 5k Reach",
+      source: "MPs",
+      authorName: "Some Wire Service",
+      links: {
+        source: trackingUrl("https://app.meltwater.com/x"),
+        article: trackingUrl("https://transition.meltwater.com/paywall/redirect/y"),
+      },
+    });
+    expect(m!.sourceName).toBe("Some Wire Service");
+    expect(m!.author).toBeNull();
   });
 });
 

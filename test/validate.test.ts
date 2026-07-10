@@ -6,7 +6,6 @@ import { validateConfig, summarizeConfig } from "@/lib/config/validate";
 // fields, so DB can be a stub.
 const GOOD: Partial<Env> = {
   WEBHOOK_SHARED_SECRET: "wh_test_token_0000000000000000000000",
-  INSPECT_KEY: "inspect_test_key_00000000000000000000",
   REPLAY_KEY: "replay_test_key_000000000000000000000",
   SLACK_BOT_TOKEN: "xoxb-fake-not-a-real-bot-token-000000",
   SLACK_DEFAULT_CHANNEL: "C0TEST000AA",
@@ -32,15 +31,15 @@ describe("validateConfig", () => {
   });
 
   it("flags missing token secrets as errors", () => {
-    for (const name of ["WEBHOOK_SHARED_SECRET", "INSPECT_KEY", "REPLAY_KEY"] as const) {
+    for (const name of ["WEBHOOK_SHARED_SECRET", "REPLAY_KEY"] as const) {
       const c = issue(mkEnv({ [name]: undefined }), name);
       expect(c).toMatchObject({ severity: "error", detail: "missing" });
     }
   });
 
   it("warns (not errors) on a too-short token", () => {
-    const env = mkEnv({ INSPECT_KEY: "short" });
-    expect(issue(env, "INSPECT_KEY")?.severity).toBe("warn");
+    const env = mkEnv({ REPLAY_KEY: "short" });
+    expect(issue(env, "REPLAY_KEY")?.severity).toBe("warn");
     // a warning alone must not fail configOk
     expect(summarizeConfig(validateConfig(env)).ok).toBe(true);
   });

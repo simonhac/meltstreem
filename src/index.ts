@@ -4,6 +4,9 @@ import { EventLog } from "@/lib/store/eventLog";
 import { SeenStore } from "@/lib/store/seen";
 import { processEvent } from "@/lib/process";
 import { replayArchivedEvents } from "@/lib/replay";
+import { redecodeRecentStories } from "@/lib/redecode";
+import { renderViewerTitle } from "@/lib/meltwater/station-resolve";
+import { accessOk, checkBearer } from "@/lib/auth";
 import { eventId, timingSafeEqualStr } from "@/lib/ids";
 import { renderInspectPage } from "@/ui/inspect";
 import { validateConfig, summarizeConfig } from "@/lib/config/validate";
@@ -11,11 +14,12 @@ import { runHeartbeat } from "@/lib/heartbeat";
 
 const app = new Hono<{ Bindings: Env }>();
 
-function checkKey(provided: string | undefined, expected: string | undefined): "ok" | "unconfigured" | "denied" {
-  if (!expected) return "unconfigured";
-  if (provided && timingSafeEqualStr(provided, expected)) return "ok";
-  return "denied";
-}
+// Never leak a page's URL to sites it links out to. Belt-and-suspenders on top of browsers' default
+// query-stripping (moot now that auth is a header/cookie rather than a ?key=).
+app.use("*", async (c, next) => {
+  await next();
+  c.header("Referrer-Policy", "no-referrer");
+});
 
 // --- health / status (no secrets leaked). Root "/" falls through to 404. ---
 app.get("/health", async (c) => {
@@ -26,22 +30,19 @@ app.get("/health", async (c) => {
   } catch {
     /* DB not migrated yet */
   }
-  // Format-validate the runtime env (never leaks values). `configOk` is public; the detailed
-  // issue list (still value-free) is gated behind the inspect key.
+  // Format-validate the runtime env (never leaks values). Only the `configOk` boolean is public.
   const config = summarizeConfig(validateConfig(c.env));
-  const showConfigDetail = checkKey(c.req.query("key"), c.env.INSPECT_KEY) === "ok";
   return c.json({
     service: "headwater",
-    build: "headwater-4", // bump on each deploy to confirm the running code
+    build: "headwater-10", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     configOk: config.ok,
-    ...(showConfigDetail ? { configIssues: config.issues } : {}),
     configured: {
       webhookSecret: !!c.env.WEBHOOK_SHARED_SECRET,
-      inspectKey: !!c.env.INSPECT_KEY,
       slackToken: !!c.env.SLACK_BOT_TOKEN,
       slackChannel: !!c.env.SLACK_DEFAULT_CHANNEL,
+      accessConfigured: !!c.env.ACCESS_TEAM_DOMAIN && !!c.env.ACCESS_AUD,
     },
   });
 });
@@ -87,11 +88,9 @@ app.post("/webhooks/meltwater/:token", async (c) => {
   return c.text("ok", 200);
 });
 
-// --- inspection (gated by ?key=) ---
+// --- inspection (gated by Cloudflare Access — verify the injected JWT, fail-closed) ---
 app.get("/api/webhooks/recent", async (c) => {
-  const gate = checkKey(c.req.query("key"), c.env.INSPECT_KEY);
-  if (gate === "unconfigured") return c.text("INSPECT_KEY not configured", 503);
-  if (gate === "denied") return c.text("forbidden", 403);
+  if (!(await accessOk(c.env, c.req.header("cf-access-jwt-assertion")))) return c.text("forbidden", 403);
   const limit = Math.min(Number(c.req.query("limit") ?? "50") || 50, 200);
   const events = await new EventLog(c.env.DB).recent(limit);
   return c.json(events);
@@ -99,7 +98,7 @@ app.get("/api/webhooks/recent", async (c) => {
 
 // --- admin: reparse + repost the archived real webhooks (gated by REPLAY_KEY) ---
 app.post("/admin/replay", async (c) => {
-  const gate = checkKey(c.req.query("key"), c.env.REPLAY_KEY);
+  const gate = checkBearer(c.req.header("authorization"), c.env.REPLAY_KEY);
   if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
   if (gate === "denied") return c.text("forbidden", 403);
   if (c.env.POSTING_ENABLED !== "true") return c.text("POSTING_ENABLED is not true", 409);
@@ -116,28 +115,63 @@ app.post("/admin/replay", async (c) => {
   }
 });
 
+// --- admin: re-render recent stories' cards under the current decoding and chat.update them in place
+// (non-destructive; preserves reactions/threads). Gated by REPLAY_KEY. `hours` window defaults to 7
+// days; `dryRun=1` previews the changes without touching Slack. ---
+app.post("/admin/redecode", async (c) => {
+  const gate = checkBearer(c.req.header("authorization"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  const dryRun = c.req.query("dryRun") === "1";
+  if (!dryRun && c.env.POSTING_ENABLED !== "true") {
+    return c.text("POSTING_ENABLED is not true (use dryRun=1 to preview)", 409);
+  }
+  const hoursRaw = Number(c.req.query("hours"));
+  const hours = Number.isFinite(hoursRaw) && hoursRaw > 0 ? hoursRaw : 24 * 7;
+  try {
+    const result = await redecodeRecentStories(c.env, { hours, dryRun, now: Date.now() });
+    return c.json(result);
+  } catch (e) {
+    return c.json({ error: String(e) }, 500);
+  }
+});
+
+// --- admin: verify Browser Rendering — render a Meltwater viewer URL and return its title/station.
+// Gated by REPLAY_KEY; host-restricted to meltwater.com so it can't render arbitrary URLs. ---
+app.get("/admin/render-station", async (c) => {
+  const gate = checkBearer(c.req.header("authorization"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  const url = c.req.query("url") ?? "";
+  let host = "";
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return c.json({ error: "invalid url" }, 400);
+  }
+  if (!/(^|\.)meltwater\.com$/.test(host)) return c.json({ error: "url host must be meltwater.com" }, 400);
+  const title = await renderViewerTitle(c.env, url);
+  return c.json({ title, station: title ? (title.split(" - ")[0]?.trim() ?? null) : null });
+});
+
 // --- admin: run the ingestion heartbeat on demand (same check the cron runs); gated by REPLAY_KEY ---
 app.get("/admin/heartbeat", async (c) => {
-  const gate = checkKey(c.req.query("key"), c.env.REPLAY_KEY);
+  const gate = checkBearer(c.req.header("authorization"), c.env.REPLAY_KEY);
   if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
   if (gate === "denied") return c.text("forbidden", 403);
   return c.json(await runHeartbeat(c.env, Date.now()));
 });
 
 app.get("/inspect", async (c) => {
-  const key = c.req.query("key");
-  const gate = checkKey(key, c.env.INSPECT_KEY);
-  if (gate === "unconfigured") return c.text("INSPECT_KEY not configured", 503);
-  if (gate === "denied") return c.text("forbidden", 403);
+  if (!(await accessOk(c.env, c.req.header("cf-access-jwt-assertion")))) return c.text("forbidden", 403);
   const PAGE_SIZE = 50;
   const beforeRaw = Number(c.req.query("before"));
   const before = Number.isFinite(beforeRaw) && beforeRaw > 0 ? beforeRaw : null;
   const events = await new EventLog(c.env.DB).page(before, PAGE_SIZE);
   // A full page implies older history may exist; the cursor is the oldest row shown.
   const olderCursor = events.length === PAGE_SIZE ? events[events.length - 1]!.received_at : null;
-  return c.html(
-    renderInspectPage(events, `key=${encodeURIComponent(key ?? "")}`, { before, olderCursor }),
-  );
+  // No ?key= needed — Access's session cookie authenticates the pager/JSON links.
+  return c.html(renderInspectPage(events, "", { before, olderCursor }));
 });
 
 // Cron trigger (wrangler.jsonc `triggers.crons`): the ingestion heartbeat. Never throw out of

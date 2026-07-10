@@ -1,5 +1,5 @@
 import type { NormalizedMention } from "./types";
-import { hostnameOf, mastheadForDomain } from "./outlets";
+import { deriveOutletName, hostnameOf, mastheadForDomain, looksLikePerson } from "./outlets";
 
 /**
  * DEFENSIVE parser. Meltwater's Generic Webhook payload schema is undocumented,
@@ -144,6 +144,42 @@ function unwrapTrackingUrl(v: Json): string | null {
   }
 }
 
+/** A Meltwater tracking/redirect host (not a real publisher), e.g. app.meltwater.com, transition.meltwater.com. */
+function isTrackingHost(host: string): boolean {
+  return host === "meltwater.com" || host.endsWith(".meltwater.com");
+}
+
+/** First URL whose host is a real publisher (skipping Meltwater's own tracking/redirect hosts); null if none. */
+function firstPublisherUrl(urls: (string | null)[]): string | null {
+  for (const u of urls) {
+    const host = hostnameOf(u);
+    if (host && !isTrackingHost(host)) return u;
+  }
+  return null;
+}
+
+/** Radio/TV — these carry their own station-resolution path in process.ts, so leave them to it. */
+export function isBroadcastMedium(mediaType: string | null): boolean {
+  const t = (mediaType ?? "").toLowerCase();
+  return t === "radio" || t === "tv" || t === "television";
+}
+
+/**
+ * Does `authorName` name the same entity as the publisher domain — i.e. it's the OUTLET, not a byline?
+ * (e.g. "Bendigo Advertiser" ↔ bendigoadvertiser.com.au.) Compares alphanumerics of the name against
+ * the domain's registrable label, ignoring case/punctuation. Used to avoid demoting an outlet-name to
+ * the Author field for domains not in the masthead table. A journalist byline ("Jorge Branco") shares
+ * no such overlap with its publisher's domain ("nine.com.au").
+ */
+function authorIsOutlet(author: string | null, host: string | null): boolean {
+  const alnum = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const a = alnum(author ?? "");
+  if (a.length < 3) return false;
+  const core = alnum(deriveOutletName(host) ?? "");
+  const full = alnum(host ?? "");
+  return (!!core && (core.includes(a) || a.includes(core))) || full.includes(a);
+}
+
 /** Strip trailing Meltwater annotations from an outlet name, e.g. "(Print version) (Licensed by …)". */
 function cleanOutletName(v: Json): string | null {
   let s = str(v);
@@ -158,20 +194,41 @@ function cleanOutletName(v: Json): string | null {
 
 function everyMentionToMention(doc: Record<string, Json>, topBrief: string | null): NormalizedMention {
   const links = asRecord(doc["links"]) ?? {};
-  const outletUrl = unwrapTrackingUrl(links["source"]); // publisher home (for the logo + masthead)
+  const mediaType = normalizeMedium(doc["providerType"]);
+  const sourceUrl = unwrapTrackingUrl(links["source"]); // publisher home (for the logo + masthead)
+  const articleUrl = unwrapTrackingUrl(links["article"]); // real article URL, or a Meltwater redirect host
   const rawAuthor = cleanOutletName(doc["authorName"]);
-  // `authorName` is the outlet for some content but a byline for wire/agency content; when the
-  // publisher domain resolves to a known masthead, use that and treat `authorName` as the byline.
-  const masthead = mastheadForDomain(hostnameOf(outletUrl));
-  const sourceName = masthead ?? rawAuthor;
+
+  // `authorName` is the outlet for some content but a JOURNALIST byline for wire/agency/syndicated
+  // content. The real publisher lives in the links: prefer `links.source` (the outlet home), fall back
+  // to `links.article`, ignoring Meltwater's own tracking hosts. Whenever we can name the publisher
+  // (a known masthead, else a name derived from its domain) that becomes the outlet and `authorName`
+  // is demoted to the byline. Broadcast keeps its existing masthead-only lookup — process.ts resolves
+  // the station name separately and shouldn't have a domain guessed underneath it.
+  const publisherUrl = isBroadcastMedium(mediaType) ? sourceUrl : firstPublisherUrl([sourceUrl, articleUrl]);
+  const publisherHost = hostnameOf(publisherUrl);
+  let outlet: string | null;
+  if (isBroadcastMedium(mediaType)) {
+    outlet = mastheadForDomain(publisherHost); // process.ts refines this into the station name
+  } else if (publisherHost) {
+    // Known masthead → authorName is the byline. Otherwise recover the outlet from the domain ONLY when
+    // authorName reads like a person; a masthead-like authorName (or one that already names the domain)
+    // is kept as-is rather than mangled into a domain-derived name ("Chelsea Mordialloc Mentone News").
+    const keepAuthor = authorIsOutlet(rawAuthor, publisherHost) || !looksLikePerson(rawAuthor);
+    outlet = mastheadForDomain(publisherHost) ?? (keepAuthor ? null : deriveOutletName(publisherHost));
+  } else {
+    outlet = null;
+  }
+  const sourceName = outlet ?? rawAuthor; // no nameable publisher → keep authorName as the header (status quo)
   const author =
-    masthead && rawAuthor && rawAuthor.toLowerCase() !== masthead.toLowerCase() ? rawAuthor : null;
+    outlet && rawAuthor && rawAuthor.toLowerCase() !== outlet.toLowerCase() ? rawAuthor : null;
+
   return {
     url: str(links["article"]) ?? str(pick(doc, [...KEYS.url])), // keep the licensed/tracking link as-is
-    outletUrl,
+    outletUrl: publisherUrl ?? sourceUrl,
     title: str(pick(doc, [...KEYS.title])),
     sourceName,
-    mediaType: normalizeMedium(doc["providerType"]),
+    mediaType,
     countryCode: str(pick(doc, [...KEYS.countryCode])),
     reach: reachFromStatusLine(doc["statusLine"]),
     sentiment: sentimentFromStatusLine(doc["statusLine"]),

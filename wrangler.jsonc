@@ -4,12 +4,21 @@
   "main": "src/index.ts",
   "compatibility_date": "2025-11-01",
   "compatibility_flags": ["nodejs_compat"],
+  // Only served on the custom domain (feed.moofer.com); disable the workers.dev URL so it can't be
+  // used to reach the Worker around Cloudflare Access.
+  "workers_dev": false,
   "observability": {
     "enabled": true
   },
+  // Cloudflare Browser Rendering — headless Chromium used to resolve broadcast station names from the
+  // JS-rendered Meltwater viewer. Called at most once per new station code, then cached in D1.
+  "browser": {
+    "binding": "BROWSER"
+  },
   "vars": {
-    // Non-secret config. Secrets live in .dev.vars (local) and `wrangler secret put` (prod).
-    // Live: posts to Slack. Set to "false" to pause (pipeline still logs + previews in /inspect).
+    // Non-secret config. Secrets — and the deployment-specific ACCESS_TEAM_DOMAIN / ACCESS_AUD —
+    // live in .dev.vars (local) and `wrangler secret put` (prod), so this public repo carries no
+    // real values. Live: posts to Slack. Set to "false" to pause (pipeline still previews in /inspect).
     "POSTING_ENABLED": "true"
   },
   "routes": [

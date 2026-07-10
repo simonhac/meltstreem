@@ -7,7 +7,6 @@ import {
   escapeMrkdwn,
   highlightKeywordsAsCode,
   buildMentionsLine,
-  truncate,
   hasAnyKeyword,
 } from "./highlight";
 
@@ -23,6 +22,8 @@ export interface SlackAttachment {
   fallback: string;
   author_name?: string;
   author_icon?: string;
+  /** Hyperlinks the author_name (the masthead) — set only when the title just repeats the masthead. */
+  author_link?: string;
   title?: string;
   title_link?: string;
   text?: string;
@@ -156,6 +157,12 @@ export function briefColor(brief: BriefRule): string {
   return brief.color ?? DEFAULT_BRIEF_COLOR;
 }
 
+/** Case- and whitespace-insensitive equality — for spotting a title that just repeats the masthead. */
+export function sameText(a: string, b: string): boolean {
+  const norm = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
+  return norm(a) === norm(b);
+}
+
 /**
  * Build the Streem-style classic attachment for one mention. `otherOutlets` are additional outlets
  * that carried the same (syndicated) story; `otherBriefLabels` are the non-primary Organisation
@@ -173,15 +180,23 @@ export function buildAttachment(
   const masthead = m.sourceName ?? "Unknown source";
   const title = cleanTitle(m.title) ?? m.url ?? "(untitled)";
 
-  // body: when there's a snippet, always show it (keywords highlighted as pills) and, if any tracked
-  // keyword is mentioned in the item but NOT visible in the shown snippet, append an
-  // "(also mentions `kw` …)" suffix. With no snippet, fall back to the "Mentions: kw (n)" summary.
+  // For broadcast the program label IS the station name, so the title just repeats the masthead
+  // heading (e.g. "Triple M Gippsland 94.3 & 97.9" twice). When they match, don't print it twice:
+  // drop the separate title line and hyperlink the heading itself via `author_link` instead.
+  const titleRepeatsMasthead = sameText(title, masthead);
+
+  // body: when there's a snippet, always show it (keywords highlighted as pills) and append an
+  // "(also mentions `kw` …)" suffix listing every Meltwater-matched keyword NOT already visible in the
+  // title or snippet. Meltwater matches keywords across the whole article but sends only a short (≤300-
+  // char) excerpt, so most matched keywords aren't in it — the suffix surfaces them. Snippets arrive
+  // pre-trimmed, so no truncation is needed. With no snippet, fall back to the "Mentions: kw (n)" line.
   const fullText = `${m.title ?? ""} ${m.snippet ?? ""}`.trim();
   let text: string | undefined;
   if (m.snippet) {
-    const shown = truncate(m.snippet);
-    const body = highlightKeywordsAsCode(shown, kws); // escapes + pills; plain-escaped when kws empty
-    const alsoMentions = kws.filter((k) => !hasAnyKeyword(shown, [k]) && hasAnyKeyword(fullText, [k]));
+    const body = highlightKeywordsAsCode(m.snippet, kws); // escapes + pills; plain-escaped when kws empty
+    const alsoMentions = [...new Set(m.matchedKeywords.filter(Boolean))].filter(
+      (k) => !hasAnyKeyword(fullText, [k]),
+    );
     const suffix = alsoMentions.length
       ? ` (also mentions ${alsoMentions.map((k) => "`" + escapeMrkdwn(k) + "`").join(" ")})`
       : "";
@@ -234,17 +249,37 @@ export function buildAttachment(
   const logo = sourceLogoUrl(m.sourceName, m.outletUrl ?? m.url);
   const att: SlackAttachment = {
     color: briefColor(brief),
-    fallback: `${masthead}: ${title}`,
+    fallback: titleRepeatsMasthead ? masthead : `${masthead}: ${title}`,
     author_name: logo ? masthead : `${mediaTypeEmoji(m.mediaType)} ${masthead}`,
-    title,
+    // Keep `title` in its original position for the common (non-repeat) case so the attachment hash
+    // of every existing card stays stable — only the collapsed broadcast cards should re-render.
+    ...(titleRepeatsMasthead ? {} : { title }),
     fields,
     mrkdwn_in: ["text", "fields"],
   };
   if (logo) att.author_icon = logo;
-  if (m.url) att.title_link = m.url;
+  if (m.url) {
+    if (titleRepeatsMasthead) att.author_link = m.url; // link the heading instead of the dropped title
+    else att.title_link = m.url;
+  }
   if (text) att.text = text;
   if (footerBits.length) att.footer = footerBits.join("  ·  ");
   return att;
+}
+
+/**
+ * Stable, cheap (non-crypto FNV-1a) hash of a rendered attachment — stored per story so the redecode
+ * backfill can tell whether re-rendering a card under the current code actually changed it, and only
+ * chat.update the ones that did. Key order in `buildAttachment` is deterministic, so this is stable.
+ */
+export function attachmentHash(att: SlackAttachment): string {
+  const s = JSON.stringify(att);
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
 }
 
 export function buildPostPayload(

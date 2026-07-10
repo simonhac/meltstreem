@@ -10,20 +10,27 @@ disabled), and posts it — replacing Meltwater's noisy built-in Slack feed.
 - **Streem-style output:** source + icon, bold linked headline, snippet with matched keywords as `code` pills (or a `Mentions: kw (n)` line), and an **Author | Organisation Brief** footer. Slack auto-unfurl is disabled.
 - **Syndication de-dup:** the same wire story across many outlets collapses into one message that lists every outlet (`📡 Also in: …`) — via `chat.update`.
 - **Tuning surface:** `src/config/feed.config.ts` (briefs, keywords, source allow/block, reach, media types)
-- **Persistence (D1):** `webhook_events` (raw + parsed + decision, powers `/inspect`), `seen_mentions` (dedupe), `stories` (syndication tracking), `ops_state` (heartbeat bookkeeping)
+- **Broadcast station names:** radio/TV alerts don't carry the station — it's resolved from Meltwater's JS viewer and cached in D1 (see [Broadcast station names](#broadcast-station-names))
+- **Persistence (D1):** `webhook_events` (raw + parsed + decision, powers `/inspect`), `seen_mentions` (dedupe), `stories` (syndication tracking + `render_hash` for the redecode backfill), `broadcast_stations` + `station_names` (radio/TV station resolution), `ops_state` (heartbeat bookkeeping)
+- **Cloudflare resources:** **Workers** (the app), **D1** (all persistence above), and **Browser Rendering** (the `browser` binding — headless Chromium, used *only* for first-time station-name resolution; a few seconds per new station, well within the free 10 min/day)
 - **Inspect:** `GET /inspect?key=…` — recent events, raw payload, filter decision + reason, Block Kit preview
 - **Monitoring:** `GET /health` validates the runtime config (`configOk`); an hourly cron **heartbeat** alerts Slack if ingestion goes quiet (`src/lib/heartbeat.ts`)
 
 Deferred (not built): RSS-poll fallback and the native REST API path. Print is excluded (no plan credit).
 
 ## Endpoints
+Auth model (all fail-closed except the two public routes) — see [Access & security model](#access--security-model).
+
 | Route | Auth | Purpose |
 |---|---|---|
-| `GET /health` | none | health/status JSON (no secrets) incl. `configOk`; add `?key=INSPECT_KEY` for the `configIssues` detail; `/` returns 404 |
+| `GET /health` | none (public) | health/status JSON (no secrets); `configOk` boolean; `/` returns 404 |
 | `POST /webhooks/meltwater/:token` | path token = `WEBHOOK_SHARED_SECRET` | receive a Meltwater alert |
-| `GET /inspect?key=…` | `key` = `INSPECT_KEY` | inspection UI |
-| `GET /api/webhooks/recent?key=…` | `key` = `INSPECT_KEY` | recent events as JSON |
-| `GET /admin/heartbeat?key=…` | `key` = `REPLAY_KEY` | run the ingestion-stall check on demand |
+| `GET /inspect` | **Cloudflare Access** (login) | inspection UI |
+| `GET /api/webhooks/recent` | **Cloudflare Access** | recent events as JSON |
+| `POST /admin/redecode` | `Authorization: Bearer REPLAY_KEY` | re-render recent cards under the current decoding and `chat.update` the changed ones in place (non-destructive). `dryRun=1` previews; `hours=N` sets the window (default 168); capped at 40 updates/call (re-run until `remaining` is 0) |
+| `POST /admin/replay` | `Authorization: Bearer REPLAY_KEY` | reparse + **repost** archived events (destructive — clears + reposts; prefer `/admin/redecode`) |
+| `GET /admin/render-station?url=…` | `Authorization: Bearer REPLAY_KEY` | render a Meltwater viewer URL via Browser Rendering and return its station name (debug/verify) |
+| `GET /admin/heartbeat` | `Authorization: Bearer REPLAY_KEY` | run the ingestion-stall check on demand |
 
 ## Local development
 ```bash
@@ -32,10 +39,10 @@ cp .dev.vars.example .dev.vars          # then edit the secrets
 pnpm db:migrate:local                   # apply D1 migration to the local db
 pnpm dev                                 # wrangler dev on http://localhost:8787
 
-# send a sample alert:
+# send a sample alert (token = your WEBHOOK_SHARED_SECRET from .dev.vars):
 curl -X POST --data-binary @test/sample-alert.json \
   http://localhost:8787/webhooks/meltwater/dev-secret-change-me
-open "http://localhost:8787/inspect?key=dev-inspect-change-me"
+open "http://localhost:8787/inspect"   # /inspect is Access-gated in prod; DEV_SKIP_ACCESS=true opens it locally
 ```
 `pnpm test` runs the unit tests; `pnpm typecheck` runs `tsc --noEmit`.
 
@@ -54,22 +61,51 @@ Edit `src/config/feed.config.ts`. Start lenient, watch `/inspect` on real traffi
 > extracts fields defensively from many candidate names. **After the first real alert, open
 > `/inspect`, read the raw payload, and tighten `parse.ts` to the actual field names.**
 
+## Broadcast station names
+Radio/TV alerts (`providerType: tveyes_*`) don't carry the station in the payload — `authorName` is
+either the station *or* the on-air reporter, and the real station name lives only on Meltwater's
+broadcast **viewer**, which is a client-rendered SPA (so `curl` can't read it). We resolve it in two
+cached steps (`src/lib/meltwater/station-resolve.ts`):
+
+1. **Code** — follow `links.article` server-side to the `mediaView` token and read its numeric
+   `Station=<code>`. Cached in D1 `broadcast_stations` by Meltwater doc id, so each clip is fetched at
+   most once.
+2. **Name** — map `<code>` → display name via the D1 `station_names` table (seeded in
+   `migrations/0007`). On a miss, **Cloudflare Browser Rendering** (the `browser` binding) loads the
+   viewer *once* — at ingestion, while the token is fresh — follows its JS redirects, reads the station
+   from the page title (`"702 ABC Sydney - <program> - <time>"`), and caches `code → name`. Every later
+   clip from that station then resolves for free, with no browser.
+
+The resolved station becomes the card header and any reporter drops to the **Author** byline. Adding or
+correcting a station is a one-row `INSERT` into `station_names` — **no deploy, no code change**:
+```bash
+npx wrangler d1 execute headwater --remote \
+  --command "INSERT OR REPLACE INTO station_names (code, name) VALUES ('8645', '702 ABC Sydney')"
+```
+`GET /admin/render-station?key=<REPLAY_KEY>&url=<viewer url>` renders a viewer URL on demand to check
+what a station resolves to. The `/admin/redecode` backfill re-applies station names to already-posted
+cards from the D1 map only (it never renders), so old clips upgrade once their station is known.
+
 ## Deploy to Cloudflare
+Browser Rendering needs no separate provisioning — the `browser` binding in `wrangler.jsonc` enables it
+(free tier: 10 min/day). Then:
 ```bash
 npx wrangler login
 npx wrangler d1 create headwater               # paste the printed database_id into wrangler.jsonc
 pnpm db:migrate:remote
 
-# secrets (prod):
-npx wrangler secret put WEBHOOK_SHARED_SECRET   # long random string
-npx wrangler secret put INSPECT_KEY
-npx wrangler secret put SLACK_BOT_TOKEN          # xoxb-… (later)
-npx wrangler secret put SLACK_DEFAULT_CHANNEL    # e.g. C0123ABCD (later)
-npx wrangler secret put REPLAY_KEY               # gates /admin/replay and /admin/heartbeat
+# secrets (prod) — set each with `wrangler secret put <NAME>`; where to get each value:
+npx wrangler secret put WEBHOOK_SHARED_SECRET   # webhook path token — generate: openssl rand -hex 32
+npx wrangler secret put REPLAY_KEY              # bearer token for /admin/* — generate: openssl rand -hex 32
+npx wrangler secret put SLACK_BOT_TOKEN         # xoxb-… — Slack app → OAuth & Permissions (later)
+npx wrangler secret put SLACK_DEFAULT_CHANNEL   # channel id, e.g. C0123ABCD — Slack channel → Copy link
+npx wrangler secret put ACCESS_TEAM_DOMAIN      # https://<team>.cloudflareaccess.com — Zero Trust → Settings
+npx wrangler secret put ACCESS_AUD              # Access → Applications → your app → Application Audience (AUD) Tag
 
-pnpm deploy                                      # → https://headwater.<subdomain>.workers.dev
+pnpm deploy                                     # → your custom domain (workers.dev is disabled)
 ```
-Gate `/inspect` with **Cloudflare Access** in prod for real protection (the `?key=` is a minimal fallback).
+The last two secrets come from the Cloudflare Access setup — see [Access & security model](#access--security-model),
+which also explains why `/inspect` and `/admin/*` are **non-functional until you configure it**.
 
 ## Wire up Meltwater
 Two separate steps. Registering the webhook **destination** is not enough on its own — you must also
@@ -96,7 +132,7 @@ sends nothing until an alert names it as a delivery method.
    keep the email alert too, or untick it for webhook-only.
 5. **Save.** Repeat for every alert/search you want in the feed.
 
-There is **no "test" button** — Meltwater POSTs on the next matching mention. Watch `/inspect?key=…`
+There is **no "test" button** — Meltwater POSTs on the next matching mention. Watch `/inspect`
 for the first real payload, then tighten `src/lib/meltwater/parse.ts` to the actual field names.
 
 ### c. What the Generic Webhook UI does *not* give you (read before debugging a silent feed)
@@ -147,16 +183,16 @@ with **no error** — deliveries are rejected before they're ever logged.
 - **Config validation** — `GET /health` returns `configOk`, a *format* check of the runtime env:
   bare tokens vs a pasted URL (the classic footgun: putting the whole webhook URL in
   `WEBHOOK_SHARED_SECRET` instead of just the path token), an `xoxb-` bot token, a channel id or
-  `#name`, and `POSTING_ENABLED` being exactly `"true"`/`"false"`. It never leaks values; the
-  detailed `configIssues` list is returned only with `?key=INSPECT_KEY`. (This catches *malformed*
-  config, not a well-formed-but-wrong value — that's what the heartbeat is for.)
+  `#name`, and `POSTING_ENABLED` being exactly `"true"`/`"false"`. It never leaks values — only the
+  `configOk` boolean is exposed. (This catches *malformed* config, not a well-formed-but-wrong value —
+  that's what the heartbeat is for.)
 - **Ingestion heartbeat** — an hourly cron (`triggers.crons` in `wrangler.jsonc` → `scheduled()` in
   `src/index.ts` → `src/lib/heartbeat.ts`) checks the newest `webhook_events` row **that parsed
   into a real mention** (so empty-body probes / health pings can't mask a stall) and posts a Slack
   alert if nothing has arrived within `HEARTBEAT_MAX_SILENCE_HOURS` (default 3). It de-dupes via the
   `ops_state` table so a persistent stall pages at most once per `HEARTBEAT_REALERT_HOURS`
-  (default 6) and re-arms once ingestion recovers. Trigger it on demand at
-  `GET /admin/heartbeat?key=<REPLAY_KEY>`.
+  (default 6) and re-arms once ingestion recovers. Trigger it on demand at `GET /admin/heartbeat`
+  with `Authorization: Bearer <REPLAY_KEY>`.
   - Optional tunables (non-secret — set in `wrangler.jsonc` `vars`, or as secrets):
     `HEARTBEAT_MAX_SILENCE_HOURS`, `HEARTBEAT_REALERT_HOURS`, and `SLACK_ALERT_CHANNEL`
     (the alert channel; defaults to `SLACK_DEFAULT_CHANNEL`).
@@ -179,16 +215,48 @@ Work top-down — the first item is the most common cause and the cheapest to ch
    disabled `*.workers.dev`. Note a `403` is **not** in `/inspect` (rejected before logging).
 4. **Is the Worker healthy?** `GET /health` → `build` (matches the last deploy?),
    `postingEnabled: true`, `configOk: true`.
-5. **Are mentions arriving but not posting?** `GET /inspect?key=…` — read each event's
-   `decision`/`reason` (a filter `dropped` it, `duplicate`, or `slack_error:*`).
+5. **Are mentions arriving but not posting?** Open `GET /inspect` (behind Cloudflare Access) —
+   read each event's `decision`/`reason` (a filter `dropped` it, `duplicate`, or `slack_error:*`).
 6. **Heartbeat quiet when it shouldn't be?** It measures the newest `webhook_events` row that
    parsed into a real *mention* (not raw receipts), so probes/health-pings can't mask a stall.
    It de-dupes via `ops_state`, so a persistent stall pages at most once per re-alert window.
 
+## Access & security model
+Every endpoint except the two public ones is **fail-closed** — enforced *in the Worker*, so it stays
+shut even if Cloudflare Access is later disabled or misconfigured. None of this is a secret to hide:
+security rests on the tokens below and on *who your Access policy admits*, not on obscuring the method.
+
+| Route(s) | Guard | Why it fails closed |
+|---|---|---|
+| `POST /webhooks/meltwater/:token` | path token = `WEBHOOK_SHARED_SECRET` (timing-safe) | wrong token → 403 |
+| `GET /inspect`, `GET /api/webhooks/recent` | **Cloudflare Access** login **+** the Worker verifies the injected `Cf-Access-Jwt-Assertion` JWT (signature via your team's JWKS, plus issuer + AUD) | missing/invalid JWT → 403, even if Access is turned off |
+| `/admin/*` | `Authorization: Bearer REPLAY_KEY` (timing-safe) | wrong/absent bearer → 403 |
+| `GET /health` | public | metadata only — no secret values |
+
+Plus **`workers_dev: false`** (reachable only on the custom domain, so there's no workers.dev URL to
+sidestep Access) and a `Referrer-Policy: no-referrer` on every response.
+
+### Set up Cloudflare Access — required; `/inspect` + `/api` are non-functional without it
+1. Cloudflare **Zero Trust → Access → Applications → Add → Self-hosted**.
+2. **Destinations:** your host with path `/inspect`, and again with path `/api`. Leave `/admin`,
+   `/webhooks`, and `/health` uncovered (admin uses the bearer token; the others must stay open).
+3. **Policy:** Allow → Include → the emails/identities you trust (built-in One-time PIN needs no SSO).
+4. Give the Worker the app's two identifiers (not secrets, but keep them out of this public repo — set
+   via `wrangler secret` / `.dev.vars`, per [.dev.vars.example](.dev.vars.example)):
+   - `ACCESS_TEAM_DOMAIN` — Zero Trust → **Settings → Team domain**, as `https://<team>.cloudflareaccess.com`
+   - `ACCESS_AUD` — Access → Applications → your app → **Application Audience (AUD) Tag**
+
+Call an admin endpoint from a script (bearer, not a URL key):
+```bash
+curl -H "Authorization: Bearer $REPLAY_KEY" "https://<host>/admin/redecode?dryRun=1"
+```
+Local `wrangler dev` has no Access in front of it, so set `DEV_SKIP_ACCESS=true` in `.dev.vars` to open
+`/inspect` locally. **Never** set that in prod.
+
 ## Security & privacy
-- **No secrets in the repo.** Real secrets live only in `.dev.vars` (gitignored) and Cloudflare
-  secrets. `wrangler.jsonc` contains a D1 `database_id` (an identifier, not a credential) and your
-  Worker route. Rotate the webhook/inspect secrets and Slack token if they're ever exposed.
-- The webhook is guarded by an unguessable path token; `/inspect` and `/api/webhooks/*` by `INSPECT_KEY`.
-  For real protection on `/inspect`, put **Cloudflare Access** in front of it.
+- **No secrets in the repo** (it's public). Real secrets live only in `.dev.vars` (gitignored) and
+  `wrangler secret`; `wrangler.jsonc` carries only identifiers (the D1 `database_id`, the route).
+  Rotate `WEBHOOK_SHARED_SECRET`, `REPLAY_KEY`, and the Slack token if ever exposed.
+- Endpoint auth is the [Access & security model](#access--security-model) above — fail-closed except
+  `/health` and the webhook.
 - `src/config/feed.config.ts` ships with **generic example briefs** — replace them with your own.
