@@ -5,6 +5,7 @@ import { SeenStore } from "@/lib/store/seen";
 import { processEvent } from "@/lib/process";
 import { replayArchivedEvents } from "@/lib/replay";
 import { redecodeRecentStories } from "@/lib/redecode";
+import { renderViewerTitle } from "@/lib/meltwater/station-resolve";
 import { eventId, timingSafeEqualStr } from "@/lib/ids";
 import { renderInspectPage } from "@/ui/inspect";
 import { validateConfig, summarizeConfig } from "@/lib/config/validate";
@@ -33,7 +34,7 @@ app.get("/health", async (c) => {
   const showConfigDetail = checkKey(c.req.query("key"), c.env.INSPECT_KEY) === "ok";
   return c.json({
     service: "headwater",
-    build: "headwater-6", // bump on each deploy to confirm the running code
+    build: "headwater-8", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     configOk: config.ok,
@@ -136,6 +137,24 @@ app.post("/admin/redecode", async (c) => {
   } catch (e) {
     return c.json({ error: String(e) }, 500);
   }
+});
+
+// --- admin: verify Browser Rendering — render a Meltwater viewer URL and return its title/station.
+// Gated by REPLAY_KEY; host-restricted to meltwater.com so it can't render arbitrary URLs. ---
+app.get("/admin/render-station", async (c) => {
+  const gate = checkKey(c.req.query("key"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  const url = c.req.query("url") ?? "";
+  let host = "";
+  try {
+    host = new URL(url).hostname;
+  } catch {
+    return c.json({ error: "invalid url" }, 400);
+  }
+  if (!/(^|\.)meltwater\.com$/.test(host)) return c.json({ error: "url host must be meltwater.com" }, 400);
+  const title = await renderViewerTitle(c.env, url);
+  return c.json({ title, station: title ? (title.split(" - ")[0]?.trim() ?? null) : null });
 });
 
 // --- admin: run the ingestion heartbeat on demand (same check the cron runs); gated by REPLAY_KEY ---

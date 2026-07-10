@@ -9,7 +9,7 @@ import { postToSlack, updateSlack } from "@/lib/slack/post";
 import { StoryStore, storyKey, addOutlet, addBriefLabel, otherOutlets, type Outlet, type StoryRow } from "@/lib/story";
 import { feedConfig } from "@/config/feed.config";
 import { simhash64, hammingDistance } from "@/lib/simhash";
-import { resolveStationName } from "@/lib/meltwater/station-resolve";
+import { resolveStationNameLive } from "@/lib/meltwater/station-resolve";
 import { decide } from "@/lib/decide";
 import { sha256Hex } from "@/lib/ids";
 
@@ -105,7 +105,7 @@ export async function processEvent(
     // Broadcast: the station name isn't in the payload — resolve it (cached) and prefer it as the
     // outlet, demoting any reporter in `sourceName` to the byline.
     if (isBroadcast(mention.mediaType)) {
-      const station = await resolveStationName(env, mention.raw);
+      const station = await resolveStationNameLive(env, mention.raw, now);
       if (station && station.toLowerCase() !== (mention.sourceName ?? "").toLowerCase()) {
         if (!mention.author && mention.sourceName) mention.author = mention.sourceName;
         mention.sourceName = station;

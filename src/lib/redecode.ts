@@ -5,6 +5,7 @@ import { parseWebhookPayload, isBroadcastMedium } from "@/lib/meltwater/parse";
 import { resolveBrief } from "@/lib/filter/engine";
 import { buildAttachment, attachmentHash } from "@/lib/slack/format";
 import { updateSlack } from "@/lib/slack/post";
+import { resolveStationName } from "@/lib/meltwater/station-resolve";
 import { StoryStore, otherOutlets, type Outlet, type StoryRow } from "@/lib/story";
 import { feedConfig } from "@/config/feed.config";
 
@@ -33,63 +34,59 @@ const MAX_CHANGES_REPORTED = 200;
 const MAX_UPDATES_PER_CALL = 40;
 
 /**
- * Re-render one story's card under the CURRENT parser + outlets + format, and report whether that
- * differs from what's live in Slack (via the stored `render_hash`). Pure (no Slack/DB) so it's
- * unit-testable. The headlined mention embeds its original webhook doc (`raw`), so we re-parse that
- * to pick up today's outlet decoding; rendering it with today's `buildAttachment` also picks up
- * format changes (e.g. the "also mentions" fix) that leave the mention fields untouched — which a
- * snapshot-vs-snapshot diff would miss. Comparing to `render_hash` (the card as last sent) is what
- * catches both. Secondary outlets carry no raw, so only the headline is re-decoded (they still render
- * in the "Also in:" line). A NULL `render_hash` (row posted before the column existed) counts as
- * changed, so the first backfill refreshes it.
+ * Pure: reparse a story's embedded webhook doc (`raw`) under the CURRENT parser, so re-decoding picks
+ * up today's outlet mapping. Broadcast station resolution needs D1, so it's applied separately by the
+ * orchestrator via {@link resolveBroadcast}. Returns `reparsed: null` when there's no re-parseable raw.
  */
-export function redecodeStory(row: StoryRow): {
-  skipped: boolean;
-  changed: boolean;
-  from: string;
-  to: string;
-  newPrimary: NormalizedMention;
-  attachment: SlackAttachment;
-  hash: string;
-} {
+export function reparseStory(row: StoryRow): { oldPrimary: NormalizedMention; reparsed: NormalizedMention | null } {
   const oldPrimary = JSON.parse(row.primary_mention_json) as NormalizedMention;
-  const outlets = JSON.parse(row.outlets_json) as Outlet[];
-  const briefLabels = JSON.parse(row.brief_labels_json || "[]") as string[];
-  const render = (p: NormalizedMention): SlackAttachment =>
-    buildAttachment(p, resolveBrief(p, feedConfig), otherOutlets(outlets, p), briefLabels.slice(1), row.created_at);
-
   const reparsed = oldPrimary.raw != null ? (parseWebhookPayload(oldPrimary.raw)[0] ?? null) : null;
-  if (!reparsed) {
-    const label = oldPrimary.sourceName ?? "";
-    return { skipped: true, changed: false, from: label, to: label, newPrimary: oldPrimary, attachment: render(oldPrimary), hash: row.render_hash ?? "" };
-  }
-  // Broadcast station names come from process.ts's live station-code resolution (network + D1 cache),
-  // which a pure re-parse can't reproduce — so keep the stored station header + reporter byline and only
-  // re-render body/format changes. Otherwise a resolved station ("4BC 1116 News Talk") would regress to
-  // the raw reporter name ("Ben Davis") that the parser falls back to.
-  const newPrimary = isBroadcastMedium(reparsed.mediaType)
-    ? { ...reparsed, sourceName: oldPrimary.sourceName, author: oldPrimary.author, outletUrl: oldPrimary.outletUrl }
-    : reparsed;
-  const attachment = render(newPrimary);
-  const hash = attachmentHash(attachment);
-  return {
-    skipped: false,
-    changed: row.render_hash !== hash,
-    from: oldPrimary.sourceName ?? "",
-    to: newPrimary.sourceName ?? "",
-    newPrimary,
-    attachment,
-    hash,
-  };
+  return { oldPrimary, reparsed };
 }
 
 /**
- * Re-render the cards of stories touched within the last `hours` under the current parser + outlets
- * table, and chat.update in place any whose rendering changed (e.g. after adding an outlet decoding or
- * fixing snippet formatting). Non-destructive: it edits existing messages, never deletes/reposts, so
- * reactions/threads survive. `dryRun` reports what would change without calling Slack. Bounded by
- * recency (idx_stories_updated_at) so it never walks the whole archive. `now` is passed in (route uses
- * Date.now()) to keep this deterministic and testable.
+ * Pure: given a broadcast station name resolved from D1 (or null), decide the headline. A resolved
+ * station becomes the header and the reporter drops to the byline; otherwise keep the stored header so
+ * a card never regresses from a real station to the raw reporter name.
+ */
+export function resolveBroadcast(
+  reparsed: NormalizedMention,
+  oldPrimary: NormalizedMention,
+  station: string | null,
+): NormalizedMention {
+  if (station) {
+    const demote = reparsed.sourceName && reparsed.sourceName.toLowerCase() !== station.toLowerCase();
+    return { ...reparsed, sourceName: station, author: reparsed.author ?? (demote ? reparsed.sourceName : null) };
+  }
+  return { ...reparsed, sourceName: oldPrimary.sourceName, author: oldPrimary.author, outletUrl: oldPrimary.outletUrl };
+}
+
+/**
+ * Pure: rebuild the card + its hash for a resolved primary. Comparing the hash to the story's stored
+ * `render_hash` (the card as last sent to Slack) is what detects a change — this catches both parse-
+ * level changes and format changes (e.g. the "also mentions" fix) that a snapshot diff would miss.
+ */
+export function renderStoryCard(row: StoryRow, primary: NormalizedMention): { attachment: SlackAttachment; hash: string } {
+  const outlets = JSON.parse(row.outlets_json) as Outlet[];
+  const briefLabels = JSON.parse(row.brief_labels_json || "[]") as string[];
+  const attachment = buildAttachment(
+    primary,
+    resolveBrief(primary, feedConfig),
+    otherOutlets(outlets, primary),
+    briefLabels.slice(1),
+    row.created_at,
+  );
+  return { attachment, hash: attachmentHash(attachment) };
+}
+
+/**
+ * Re-render the cards of stories touched within the last `hours` under the current parser + outlets +
+ * format, and chat.update in place any whose rendering changed. Non-destructive: edits existing
+ * messages, never deletes/reposts, so reactions/threads survive. Broadcast headers are re-resolved from
+ * the D1 station map (no browser here — that runs at ingestion), so a station named since the card was
+ * posted is upgraded from the reporter byline. `dryRun` reports what would change without calling Slack.
+ * Bounded by recency (idx_stories_updated_at) and by {@link MAX_UPDATES_PER_CALL} per call. `now` is
+ * passed in (route uses Date.now()) to keep this deterministic.
  */
 export async function redecodeRecentStories(
   env: Env,
@@ -112,17 +109,23 @@ export async function redecodeRecentStories(
   };
 
   for (const row of rows) {
-    const r = redecodeStory(row);
-    if (r.skipped) {
+    const { oldPrimary, reparsed } = reparseStory(row);
+    if (!reparsed) {
       res.skipped++;
       continue;
     }
-    if (!r.changed) {
+    const primary = isBroadcastMedium(reparsed.mediaType)
+      ? resolveBroadcast(reparsed, oldPrimary, await resolveStationName(env, reparsed.raw))
+      : reparsed;
+    const { attachment, hash } = renderStoryCard(row, primary);
+    if (row.render_hash === hash) {
       res.unchanged++;
       continue;
     }
     res.changed++;
-    if (res.changes.length < MAX_CHANGES_REPORTED) res.changes.push({ ts: row.slack_ts, from: r.from, to: r.to });
+    if (res.changes.length < MAX_CHANGES_REPORTED) {
+      res.changes.push({ ts: row.slack_ts, from: oldPrimary.sourceName ?? "", to: primary.sourceName ?? "" });
+    }
     if (opts.dryRun) continue;
     // Per-call cap: once we've made enough Slack calls this request, leave the rest for a re-run rather
     // than risk hitting the subrequest limit mid-flight. `failed` attempts count too (they still fetch).
@@ -131,11 +134,11 @@ export async function redecodeRecentStories(
       continue;
     }
 
-    const upd = await updateSlack(env, { channel: row.channel, ts: row.slack_ts, attachments: [r.attachment] });
+    const upd = await updateSlack(env, { channel: row.channel, ts: row.slack_ts, attachments: [attachment] });
     if (upd.ok) {
       // Persist the corrected snapshot + new render hash so later syndication merges keep the fix
       // (rather than reviving the stale decoding from primary_mention_json) and re-runs stay idempotent.
-      await stories.updateRenderState(row.story_key, r.newPrimary, r.hash);
+      await stories.updateRenderState(row.story_key, primary, hash);
       res.updated++;
     } else {
       res.failed++;

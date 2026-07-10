@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { parseWebhookPayload } from "@/lib/meltwater/parse";
-import { redecodeStory, redecodeRecentStories } from "@/lib/redecode";
+import { reparseStory, renderStoryCard, resolveBroadcast, redecodeRecentStories } from "@/lib/redecode";
 import type { StoryRow } from "@/lib/story";
 import type { NormalizedMention } from "@/lib/meltwater/types";
 import type { Env } from "@/env";
@@ -46,30 +46,38 @@ const nineDoc = {
   },
 };
 
-describe("redecodeStory (redecode.ts)", () => {
+const radioDoc = {
+  providerType: "tveyes_radio",
+  statusLine: "🔊 1.1M Reach",
+  source: "MPs",
+  authorName: "Ben Davis",
+  links: { source: trackingUrl("https://transition.meltwater.com/paywall/redirect/xyz") },
+};
+
+describe("reparseStory + renderStoryCard (redecode.ts)", () => {
   it("re-decodes a stale byline header (Jorge Branco → 9News), moving the reporter to Author", () => {
     // The stored snapshot has the pre-fix decoding: the byline sat in the header, no Author.
-    const r = redecodeStory(storyRow(nineDoc, { sourceName: "Jorge Branco", author: null }));
-    expect(r.skipped).toBe(false);
-    expect(r.changed).toBe(true); // NULL render_hash → treated as changed on the first backfill
-    expect(r.from).toBe("Jorge Branco");
-    expect(r.to).toBe("9News");
-    expect(r.newPrimary.author).toBe("Jorge Branco");
+    const row = storyRow(nineDoc, { sourceName: "Jorge Branco", author: null });
+    const { oldPrimary, reparsed } = reparseStory(row);
+    expect(oldPrimary.sourceName).toBe("Jorge Branco"); // the "from"
+    expect(reparsed!.sourceName).toBe("9News"); // the "to"
+    expect(reparsed!.author).toBe("Jorge Branco");
+    const { hash } = renderStoryCard(row, reparsed!);
+    expect(row.render_hash === hash).toBe(false); // NULL render_hash → changed on the first backfill
   });
 
   it("is idempotent once render_hash matches the current render", () => {
     const row = storyRow(nineDoc); // snapshot already reflects current decoding
-    const first = redecodeStory(row);
-    const second = redecodeStory({ ...row, render_hash: first.hash });
-    expect(second.changed).toBe(false); // hash matches → nothing to update
+    const { hash } = renderStoryCard(row, reparseStory(row).reparsed!);
+    const row2 = { ...row, render_hash: hash };
+    const { hash: hash2 } = renderStoryCard(row2, reparseStory(row2).reparsed!);
+    expect(row2.render_hash === hash2).toBe(true); // hash matches → nothing to update
   });
 
   it("flags a format-only change via render_hash even when the parse is unchanged (also-mentions)", () => {
-    // Same parse either way; only buildAttachment's output differs from what was last sent. A stale
-    // hash still marks the card as changed — a snapshot-vs-snapshot diff would have missed this.
     const doc = {
       providerType: "news",
-      statusLine: "😐 4.82k Reach — 😐 Neutral Sentiment",
+      statusLine: "😐 4.82k Reach",
       source: "MPs",
       title: "5th National Whistleblowing Symposium",
       authorName: "Transparency International Australia",
@@ -80,36 +88,36 @@ describe("redecodeStory (redecode.ts)", () => {
         article: trackingUrl("https://t.notifications.meltwater.com/v2/xyz"),
       },
     };
-    const r = redecodeStory(storyRow(doc, {}, "stalehash"));
-    expect(r.skipped).toBe(false);
-    expect(r.changed).toBe(true);
-    expect(r.attachment.text).toContain("(also mentions `Andrew Wilkie` `Allegra Spender` `MP`)");
+    const row = storyRow(doc, {}, "stalehash");
+    const { attachment, hash } = renderStoryCard(row, reparseStory(row).reparsed!);
+    expect(row.render_hash === hash).toBe(false); // stale hash → changed
+    expect(attachment.text).toContain("(also mentions `Andrew Wilkie` `Allegra Spender` `MP`)");
   });
 
-  it("preserves a broadcast station header instead of regressing to the reporter byline", () => {
-    // Radio: links.source is only a Meltwater host, so a pure re-parse falls back to the reporter
-    // (authorName). The station name was resolved live in process.ts and stored — keep it.
-    const radioDoc = {
-      providerType: "tveyes_radio",
-      statusLine: "🔊 1.1M Reach",
-      source: "MPs",
-      authorName: "Ben Davis",
-      links: { source: trackingUrl("https://transition.meltwater.com/paywall/redirect/xyz") },
-    };
-    const r = redecodeStory(storyRow(radioDoc, { sourceName: "4BC 1116 News Talk", author: "Ben Davis" }));
-    expect(r.to).toBe("4BC 1116 News Talk"); // NOT "Ben Davis"
-    expect(r.newPrimary.sourceName).toBe("4BC 1116 News Talk");
-    expect(r.newPrimary.author).toBe("Ben Davis");
-  });
-
-  it("skips a story whose snapshot has no re-parseable raw payload", () => {
+  it("returns reparsed=null when the snapshot has no re-parseable raw payload", () => {
     const row = storyRow(nineDoc);
     const primary = JSON.parse(row.primary_mention_json) as Record<string, unknown>;
     delete primary.raw; // no embedded webhook doc → nothing to re-parse
     row.primary_mention_json = JSON.stringify(primary);
-    const r = redecodeStory(row);
-    expect(r.skipped).toBe(true);
-    expect(r.changed).toBe(false);
+    expect(reparseStory(row).reparsed).toBeNull();
+  });
+});
+
+describe("resolveBroadcast (redecode.ts)", () => {
+  it("upgrades to the resolved station, dropping the reporter to the byline", () => {
+    const { oldPrimary, reparsed } = reparseStory(storyRow(radioDoc, { sourceName: "Ben Davis", author: null }));
+    // A pure re-parse of a radio item falls back to the reporter (no domain); a resolved station wins.
+    expect(reparsed!.sourceName).toBe("Ben Davis");
+    const up = resolveBroadcast(reparsed!, oldPrimary, "702 ABC Sydney");
+    expect(up.sourceName).toBe("702 ABC Sydney");
+    expect(up.author).toBe("Ben Davis"); // reporter demoted to byline
+  });
+
+  it("preserves the stored station header when no station resolves (no regression to reporter)", () => {
+    const { oldPrimary, reparsed } = reparseStory(storyRow(radioDoc, { sourceName: "4BC 1116 News Talk", author: "Ben Davis" }));
+    const kept = resolveBroadcast(reparsed!, oldPrimary, null);
+    expect(kept.sourceName).toBe("4BC 1116 News Talk");
+    expect(kept.author).toBe("Ben Davis");
   });
 });
 

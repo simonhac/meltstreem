@@ -13,10 +13,14 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@cloudflare/puppeteer": "^1.1.0",
     "hono": "^4.10.7"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild", "workerd"]
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "workerd"
+    ]
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.8.71",

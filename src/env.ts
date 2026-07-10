@@ -1,6 +1,12 @@
+import type { BrowserWorker } from "@cloudflare/puppeteer";
+
 export interface Env {
   /** D1 database — webhook_events + seen_mentions (see migrations/). */
   DB: D1Database;
+
+  /** Cloudflare Browser Rendering binding — resolves broadcast station names from the JS viewer.
+   * Optional so tests/pool envs without the binding type-check; renderStationName no-ops when absent. */
+  BROWSER?: BrowserWorker;
 
   // --- non-secret vars (wrangler.jsonc) ---
   /** "true" to actually post to Slack. Stays "false" until the payload is confirmed + a bot token is wired. */

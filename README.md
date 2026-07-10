@@ -10,7 +10,9 @@ disabled), and posts it — replacing Meltwater's noisy built-in Slack feed.
 - **Streem-style output:** source + icon, bold linked headline, snippet with matched keywords as `code` pills (or a `Mentions: kw (n)` line), and an **Author | Organisation Brief** footer. Slack auto-unfurl is disabled.
 - **Syndication de-dup:** the same wire story across many outlets collapses into one message that lists every outlet (`📡 Also in: …`) — via `chat.update`.
 - **Tuning surface:** `src/config/feed.config.ts` (briefs, keywords, source allow/block, reach, media types)
-- **Persistence (D1):** `webhook_events` (raw + parsed + decision, powers `/inspect`), `seen_mentions` (dedupe), `stories` (syndication tracking), `ops_state` (heartbeat bookkeeping)
+- **Broadcast station names:** radio/TV alerts don't carry the station — it's resolved from Meltwater's JS viewer and cached in D1 (see [Broadcast station names](#broadcast-station-names))
+- **Persistence (D1):** `webhook_events` (raw + parsed + decision, powers `/inspect`), `seen_mentions` (dedupe), `stories` (syndication tracking + `render_hash` for the redecode backfill), `broadcast_stations` + `station_names` (radio/TV station resolution), `ops_state` (heartbeat bookkeeping)
+- **Cloudflare resources:** **Workers** (the app), **D1** (all persistence above), and **Browser Rendering** (the `browser` binding — headless Chromium, used *only* for first-time station-name resolution; a few seconds per new station, well within the free 10 min/day)
 - **Inspect:** `GET /inspect?key=…` — recent events, raw payload, filter decision + reason, Block Kit preview
 - **Monitoring:** `GET /health` validates the runtime config (`configOk`); an hourly cron **heartbeat** alerts Slack if ingestion goes quiet (`src/lib/heartbeat.ts`)
 
@@ -23,6 +25,9 @@ Deferred (not built): RSS-poll fallback and the native REST API path. Print is e
 | `POST /webhooks/meltwater/:token` | path token = `WEBHOOK_SHARED_SECRET` | receive a Meltwater alert |
 | `GET /inspect?key=…` | `key` = `INSPECT_KEY` | inspection UI |
 | `GET /api/webhooks/recent?key=…` | `key` = `INSPECT_KEY` | recent events as JSON |
+| `POST /admin/redecode?key=…` | `key` = `REPLAY_KEY` | re-render recent cards under the current decoding and `chat.update` the changed ones in place (non-destructive). `dryRun=1` previews; `hours=N` sets the window (default 168); capped at 40 updates/call (re-run until `remaining` is 0) |
+| `POST /admin/replay?key=…` | `key` = `REPLAY_KEY` | reparse + **repost** archived events (destructive — clears + reposts; prefer `/admin/redecode`) |
+| `GET /admin/render-station?key=…&url=…` | `key` = `REPLAY_KEY` | render a Meltwater viewer URL via Browser Rendering and return its station name (debug/verify) |
 | `GET /admin/heartbeat?key=…` | `key` = `REPLAY_KEY` | run the ingestion-stall check on demand |
 
 ## Local development
@@ -54,7 +59,34 @@ Edit `src/config/feed.config.ts`. Start lenient, watch `/inspect` on real traffi
 > extracts fields defensively from many candidate names. **After the first real alert, open
 > `/inspect`, read the raw payload, and tighten `parse.ts` to the actual field names.**
 
+## Broadcast station names
+Radio/TV alerts (`providerType: tveyes_*`) don't carry the station in the payload — `authorName` is
+either the station *or* the on-air reporter, and the real station name lives only on Meltwater's
+broadcast **viewer**, which is a client-rendered SPA (so `curl` can't read it). We resolve it in two
+cached steps (`src/lib/meltwater/station-resolve.ts`):
+
+1. **Code** — follow `links.article` server-side to the `mediaView` token and read its numeric
+   `Station=<code>`. Cached in D1 `broadcast_stations` by Meltwater doc id, so each clip is fetched at
+   most once.
+2. **Name** — map `<code>` → display name via the D1 `station_names` table (seeded in
+   `migrations/0007`). On a miss, **Cloudflare Browser Rendering** (the `browser` binding) loads the
+   viewer *once* — at ingestion, while the token is fresh — follows its JS redirects, reads the station
+   from the page title (`"702 ABC Sydney - <program> - <time>"`), and caches `code → name`. Every later
+   clip from that station then resolves for free, with no browser.
+
+The resolved station becomes the card header and any reporter drops to the **Author** byline. Adding or
+correcting a station is a one-row `INSERT` into `station_names` — **no deploy, no code change**:
+```bash
+npx wrangler d1 execute headwater --remote \
+  --command "INSERT OR REPLACE INTO station_names (code, name) VALUES ('8645', '702 ABC Sydney')"
+```
+`GET /admin/render-station?key=<REPLAY_KEY>&url=<viewer url>` renders a viewer URL on demand to check
+what a station resolves to. The `/admin/redecode` backfill re-applies station names to already-posted
+cards from the D1 map only (it never renders), so old clips upgrade once their station is known.
+
 ## Deploy to Cloudflare
+Browser Rendering needs no separate provisioning — the `browser` binding in `wrangler.jsonc` enables it
+(free tier: 10 min/day). Then:
 ```bash
 npx wrangler login
 npx wrangler d1 create headwater               # paste the printed database_id into wrangler.jsonc
