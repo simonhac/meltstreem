@@ -13,7 +13,9 @@ const MASTHEAD_BY_DOMAIN: Record<string, string> = {
   "abc.net.au": "ABC",
   "afr.com": "Australian Financial Review",
   "ausdoc.com.au": "Australian Doctor",
+  "australianconveyancer.com.au": "Australian Conveyancer",
   "australianjewishnews.com": "The Australian Jewish News",
+  "ajn.timesofisrael.com": "The Australian Jewish News", // AJN's newer co-branded domain
   "cathnews.com": "CathNews",
   "cessnockadvertiser.com.au": "Cessnock Advertiser",
   "courier.net.au": "The Courier",
@@ -33,6 +35,7 @@ const MASTHEAD_BY_DOMAIN: Record<string, string> = {
   "couriermail.com.au": "The Courier-Mail",
   "dailytelegraph.com.au": "The Daily Telegraph",
   "news.com.au": "news.com.au",
+  "nine.com.au": "9News",
   "perthnow.com.au": "PerthNow",
   "skynews.com.au": "Sky News",
   "smh.com.au": "The Sydney Morning Herald",
@@ -60,4 +63,40 @@ export function mastheadForDomain(host: string | null): string | null {
     if (host === domain || host.endsWith("." + domain)) return name;
   }
   return null;
+}
+
+// Public suffixes we strip to isolate the registrable label. Longest (most specific) first so e.g.
+// "com.au" wins over "au"/"com". AU-focused, with the common global TLDs the feed also carries.
+const PUBLIC_SUFFIXES = [
+  "com.au", "net.au", "org.au", "gov.au", "edu.au", "asn.au", "id.au",
+  "co.uk", "org.uk", "co.nz",
+  "com", "net", "org", "news", "media", "co", "io", "au", "nz", "uk",
+];
+
+/**
+ * Best-effort display name for a publisher host that isn't in MASTHEAD_BY_DOMAIN. Strips a generic
+ * leading subdomain and the public suffix, then title-cases the registrable label on word breaks —
+ * e.g. "some-local-news.com.au" → "Some Local News". Concatenated single-word
+ * domains ("australianconveyancer.com.au") can't be split and come back as one word; map those in the
+ * table when the exact wording matters. Returns null for an empty/garbage host.
+ */
+export function deriveOutletName(host: string | null): string | null {
+  if (!host) return null;
+  let labels = host.toLowerCase().split(".").filter(Boolean);
+  if (labels.length > 2 && ["www", "m", "mobile", "amp"].includes(labels[0]!)) labels = labels.slice(1);
+  for (const suffix of PUBLIC_SUFFIXES) {
+    const parts = suffix.split(".");
+    if (labels.length > parts.length && labels.slice(-parts.length).join(".") === suffix) {
+      labels = labels.slice(0, -parts.length);
+      break;
+    }
+  }
+  const core = labels[labels.length - 1];
+  if (!core) return null;
+  const name = core
+    .split(/[-_]/)
+    .filter(Boolean)
+    .map((w) => w[0]!.toUpperCase() + w.slice(1))
+    .join(" ");
+  return name || null;
 }

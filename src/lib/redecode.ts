@@ -1,0 +1,127 @@
+import type { Env } from "@/env";
+import type { NormalizedMention } from "@/lib/meltwater/types";
+import type { SlackAttachment } from "@/lib/slack/format";
+import { parseWebhookPayload } from "@/lib/meltwater/parse";
+import { resolveBrief } from "@/lib/filter/engine";
+import { buildAttachment, attachmentHash } from "@/lib/slack/format";
+import { updateSlack } from "@/lib/slack/post";
+import { StoryStore, otherOutlets, type Outlet, type StoryRow } from "@/lib/story";
+import { feedConfig } from "@/config/feed.config";
+
+export interface RedecodeChange {
+  ts: string;
+  from: string; // headline outlet before the re-decode
+  to: string; // headline outlet after
+}
+
+export interface RedecodeResult {
+  windowHours: number;
+  dryRun: boolean;
+  scanned: number; // stories updated within the window
+  changed: number; // cards whose re-render differs under the current decoding
+  updated: number; // chat.update calls that succeeded (0 when dryRun)
+  failed: number; // chat.update calls that failed
+  unchanged: number; // re-render identical → left untouched
+  skipped: number; // no re-parseable raw payload in the snapshot
+  changes: RedecodeChange[]; // headline before→after (capped)
+}
+
+const MAX_CHANGES_REPORTED = 200;
+
+/**
+ * Re-render one story's card under the CURRENT parser + outlets + format, and report whether that
+ * differs from what's live in Slack (via the stored `render_hash`). Pure (no Slack/DB) so it's
+ * unit-testable. The headlined mention embeds its original webhook doc (`raw`), so we re-parse that
+ * to pick up today's outlet decoding; rendering it with today's `buildAttachment` also picks up
+ * format changes (e.g. the "also mentions" fix) that leave the mention fields untouched — which a
+ * snapshot-vs-snapshot diff would miss. Comparing to `render_hash` (the card as last sent) is what
+ * catches both. Secondary outlets carry no raw, so only the headline is re-decoded (they still render
+ * in the "Also in:" line). A NULL `render_hash` (row posted before the column existed) counts as
+ * changed, so the first backfill refreshes it.
+ */
+export function redecodeStory(row: StoryRow): {
+  skipped: boolean;
+  changed: boolean;
+  from: string;
+  to: string;
+  newPrimary: NormalizedMention;
+  attachment: SlackAttachment;
+  hash: string;
+} {
+  const oldPrimary = JSON.parse(row.primary_mention_json) as NormalizedMention;
+  const outlets = JSON.parse(row.outlets_json) as Outlet[];
+  const briefLabels = JSON.parse(row.brief_labels_json || "[]") as string[];
+  const render = (p: NormalizedMention): SlackAttachment =>
+    buildAttachment(p, resolveBrief(p, feedConfig), otherOutlets(outlets, p), briefLabels.slice(1), row.created_at);
+
+  const reparsed = oldPrimary.raw != null ? (parseWebhookPayload(oldPrimary.raw)[0] ?? null) : null;
+  if (!reparsed) {
+    const label = oldPrimary.sourceName ?? "";
+    return { skipped: true, changed: false, from: label, to: label, newPrimary: oldPrimary, attachment: render(oldPrimary), hash: row.render_hash ?? "" };
+  }
+  const attachment = render(reparsed);
+  const hash = attachmentHash(attachment);
+  return {
+    skipped: false,
+    changed: row.render_hash !== hash,
+    from: oldPrimary.sourceName ?? "",
+    to: reparsed.sourceName ?? "",
+    newPrimary: reparsed,
+    attachment,
+    hash,
+  };
+}
+
+/**
+ * Re-render the cards of stories touched within the last `hours` under the current parser + outlets
+ * table, and chat.update in place any whose rendering changed (e.g. after adding an outlet decoding or
+ * fixing snippet formatting). Non-destructive: it edits existing messages, never deletes/reposts, so
+ * reactions/threads survive. `dryRun` reports what would change without calling Slack. Bounded by
+ * recency (idx_stories_updated_at) so it never walks the whole archive. `now` is passed in (route uses
+ * Date.now()) to keep this deterministic and testable.
+ */
+export async function redecodeRecentStories(
+  env: Env,
+  opts: { hours: number; dryRun: boolean; now: number },
+): Promise<RedecodeResult> {
+  const stories = new StoryStore(env.DB);
+  const sinceMs = opts.now - opts.hours * 60 * 60 * 1000;
+  const rows = await stories.updatedSince(sinceMs);
+  const res: RedecodeResult = {
+    windowHours: opts.hours,
+    dryRun: opts.dryRun,
+    scanned: rows.length,
+    changed: 0,
+    updated: 0,
+    failed: 0,
+    unchanged: 0,
+    skipped: 0,
+    changes: [],
+  };
+
+  for (const row of rows) {
+    const r = redecodeStory(row);
+    if (r.skipped) {
+      res.skipped++;
+      continue;
+    }
+    if (!r.changed) {
+      res.unchanged++;
+      continue;
+    }
+    res.changed++;
+    if (res.changes.length < MAX_CHANGES_REPORTED) res.changes.push({ ts: row.slack_ts, from: r.from, to: r.to });
+    if (opts.dryRun) continue;
+
+    const upd = await updateSlack(env, { channel: row.channel, ts: row.slack_ts, attachments: [r.attachment] });
+    if (upd.ok) {
+      // Persist the corrected snapshot + new render hash so later syndication merges keep the fix
+      // (rather than reviving the stale decoding from primary_mention_json) and re-runs stay idempotent.
+      await stories.updateRenderState(row.story_key, r.newPrimary, r.hash);
+      res.updated++;
+    } else {
+      res.failed++;
+    }
+  }
+  return res;
+}

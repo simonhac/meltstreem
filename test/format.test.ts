@@ -134,15 +134,36 @@ describe("buildAttachment — body text", () => {
     expect(a.text).toContain("`Ross Garnaut`");
   });
 
-  it("shows the snippet plus an 'also mentions' suffix when a keyword is only in the title", () => {
+  it("surfaces matched keywords absent from the title and snippet as 'also mentions'", () => {
+    // Meltwater matches across the whole article but sends a short excerpt, so a matched keyword is
+    // often in neither the title nor the snippet. It's surfaced as an "also mentions" pill (real case:
+    // the 5th National Whistleblowing Symposium card — Andrew Wilkie / Allegra Spender / MP).
     const a = buildAttachment(
-      mention({ title: "Renewable push", snippet: "No matching term here at all." }),
+      mention({
+        title: "5th National Whistleblowing Symposium",
+        snippet: "Speakers include: Assistant Treasurer Dr Daniel Mulino and Senator Paul Scarr.",
+        matchedKeywords: ["Andrew Wilkie", "Allegra Spender", "MP"],
+      }),
       brief,
     );
-    // The snippet is always shown; the title-only keyword is surfaced as an "also mentions" pill.
-    expect(a.text).toContain("No matching term here at all.");
-    expect(a.text).toContain("(also mentions `renewable`)");
+    expect(a.text).toContain("Speakers include: Assistant Treasurer Dr Daniel Mulino and Senator Paul Scarr.");
+    expect(a.text).toContain("(also mentions `Andrew Wilkie` `Allegra Spender` `MP`)");
     expect(a.text).not.toContain("Mentions:");
+  });
+
+  it("does not repeat a matched keyword that is already visible in the title or snippet", () => {
+    const a = buildAttachment(
+      mention({
+        title: "Allegra Spender on Meta AI",
+        snippet: "The MP raised concerns.",
+        matchedKeywords: ["Allegra Spender", "MP", "Andrew Wilkie"],
+      }),
+      brief,
+    );
+    // 'Allegra Spender' is in the title and 'MP' is in the snippet → already visible; only the
+    // genuinely-hidden 'Andrew Wilkie' is surfaced.
+    expect(a.text).toContain("(also mentions `Andrew Wilkie`)");
+    expect(a.text).not.toContain("Allegra Spender");
   });
 
   it("appends no 'also mentions' suffix when every keyword is already visible in the snippet", () => {
@@ -155,8 +176,9 @@ describe("buildAttachment — body text", () => {
     expect(a.text).not.toContain("also mentions");
   });
 
-  it("lists only keywords actually present in the item (regression: Teals card)", () => {
-    // Real card: 'teal' is only in the title; the snippet and the unrelated keywords appear nowhere.
+  it("surfaces a Meltwater-matched keyword even when it isn't literally in the snippet (Teals card)", () => {
+    // Real card: Meltwater matched 'the teals' across the article; our excerpt doesn't contain the
+    // phrase. We trust the match and surface it — unmatched brief keywords ('independent') are not.
     const a = buildAttachment(
       mention({
         title: "Labor and teal preferences",
@@ -166,8 +188,7 @@ describe("buildAttachment — body text", () => {
       { id: "teals", label: "Teals", keywords: ["teal", "independent"] },
     );
     expect(a.text).toContain("predicting preferences from One Nation, Labor and the");
-    expect(a.text).toContain("(also mentions `teal`)");
-    expect(a.text).not.toContain("the teals");
+    expect(a.text).toContain("(also mentions `the teals`)");
     expect(a.text).not.toContain("independent");
   });
 

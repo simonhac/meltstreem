@@ -4,6 +4,7 @@ import { EventLog } from "@/lib/store/eventLog";
 import { SeenStore } from "@/lib/store/seen";
 import { processEvent } from "@/lib/process";
 import { replayArchivedEvents } from "@/lib/replay";
+import { redecodeRecentStories } from "@/lib/redecode";
 import { eventId, timingSafeEqualStr } from "@/lib/ids";
 import { renderInspectPage } from "@/ui/inspect";
 import { validateConfig, summarizeConfig } from "@/lib/config/validate";
@@ -32,7 +33,7 @@ app.get("/health", async (c) => {
   const showConfigDetail = checkKey(c.req.query("key"), c.env.INSPECT_KEY) === "ok";
   return c.json({
     service: "headwater",
-    build: "headwater-3", // bump on each deploy to confirm the running code
+    build: "headwater-4", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     configOk: config.ok,
@@ -110,6 +111,27 @@ app.post("/admin/replay", async (c) => {
       purgeOnly: c.req.query("purgeOnly") === "1",
       limit: Number(c.req.query("limit")) || undefined, // replay only the N most recent posted events
     });
+    return c.json(result);
+  } catch (e) {
+    return c.json({ error: String(e) }, 500);
+  }
+});
+
+// --- admin: re-render recent stories' cards under the current decoding and chat.update them in place
+// (non-destructive; preserves reactions/threads). Gated by REPLAY_KEY. `hours` window defaults to 7
+// days; `dryRun=1` previews the changes without touching Slack. ---
+app.post("/admin/redecode", async (c) => {
+  const gate = checkKey(c.req.query("key"), c.env.REPLAY_KEY);
+  if (gate === "unconfigured") return c.text("REPLAY_KEY not configured", 503);
+  if (gate === "denied") return c.text("forbidden", 403);
+  const dryRun = c.req.query("dryRun") === "1";
+  if (!dryRun && c.env.POSTING_ENABLED !== "true") {
+    return c.text("POSTING_ENABLED is not true (use dryRun=1 to preview)", 409);
+  }
+  const hoursRaw = Number(c.req.query("hours"));
+  const hours = Number.isFinite(hoursRaw) && hoursRaw > 0 ? hoursRaw : 24 * 7;
+  try {
+    const result = await redecodeRecentStories(c.env, { hours, dryRun, now: Date.now() });
     return c.json(result);
   } catch (e) {
     return c.json({ error: String(e) }, 500);
