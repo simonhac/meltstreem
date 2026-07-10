@@ -135,6 +135,37 @@ sends nothing until an alert names it as a delivery method.
 There is **no "test" button** — Meltwater POSTs on the next matching mention. Watch `/inspect`
 for the first real payload, then tighten `src/lib/meltwater/parse.ts` to the actual field names.
 
+### c. What the Generic Webhook UI does *not* give you (read before debugging a silent feed)
+The Meltwater Generic Webhook UI is deliberately minimal — a connection is only a **name + a
+URL** (the *Add Generic Webhook* dialog has just `Connection name` and `Webhook link`). Once
+saved it is effectively **write-only and opaque**, which makes a silent feed hard to debug:
+
+- **The URL is masked.** The integrations list shows only `https://<host>/***`; the path token
+  (`WEBHOOK_SHARED_SECRET`) is hidden and cannot be revealed.
+- **No edit — only delete (✕).** To change the host *or* rotate the token you must **delete the
+  connection and add a new one**. Treat the URL as immutable: if you migrate hosts (e.g.
+  `*.workers.dev` → a custom domain) or rotate the secret, the old connection keeps POSTing to
+  the old URL with **no error surfaced in Meltwater**.
+- **No test button, no delivery log, no status.** Meltwater never shows whether a delivery
+  succeeded, failed, or what HTTP status the destination returned.
+- **Registering ≠ delivering.** The connection is only a *destination*; nothing flows until a
+  search/alert is bound to it (§b). A freshly (re-)added connection has **no searches bound**.
+
+**Consequence — the destination server is the only source of truth.** Where each delivery lands:
+
+| From Meltwater | `/inspect` (D1 `webhook_events`) | CF Worker logs / `wrangler tail` | CF zone Analytics → Traffic |
+|---|---|---|---|
+| correct token → `200` | ✅ row logged | ✅ 200 invocation | ✅ 200 on the host |
+| **wrong token → `403`** | ❌ **rejected before it's logged** | ✅ 403 invocation (path shows the bad token) | ✅ 403 on the host |
+| wrong host / disabled `*.workers.dev` | ❌ | ❌ Worker never runs | ⚠️ only in *that* host's zone — a disabled `workers.dev` 404s at the edge and lands in **no** log you own |
+
+So a **token mismatch is invisible in `/inspect`** (the 403 is rejected before storage — see
+*Monitoring* below) but **is** visible in Cloudflare: a 403 POST invocation in the Worker logs /
+`wrangler tail`, and a 403 on the host in the zone's Traffic analytics — where the URL path even
+reveals the wrong token. Since Meltwater masks the token, **reading it off a Cloudflare 403 log is
+the only way to see what token is actually registered** (or just delete + re-add with the
+known-correct URL).
+
 > The search/alert name Meltwater sends becomes the Slack **brief label** (matched against
 > `matchNames` in `src/config/feed.config.ts`). A non-match still posts under `defaultBriefLabel`, so
 > naming never blocks delivery — it only affects labeling.
@@ -156,7 +187,8 @@ with **no error** — deliveries are rejected before they're ever logged.
   `configOk` boolean is exposed. (This catches *malformed* config, not a well-formed-but-wrong value —
   that's what the heartbeat is for.)
 - **Ingestion heartbeat** — an hourly cron (`triggers.crons` in `wrangler.jsonc` → `scheduled()` in
-  `src/index.ts` → `src/lib/heartbeat.ts`) checks the newest `webhook_events` row and posts a Slack
+  `src/index.ts` → `src/lib/heartbeat.ts`) checks the newest `webhook_events` row **that parsed
+  into a real mention** (so empty-body probes / health pings can't mask a stall) and posts a Slack
   alert if nothing has arrived within `HEARTBEAT_MAX_SILENCE_HOURS` (default 3). It de-dupes via the
   `ops_state` table so a persistent stall pages at most once per `HEARTBEAT_REALERT_HOURS`
   (default 6) and re-arms once ingestion recovers. Trigger it on demand at `GET /admin/heartbeat`
@@ -164,6 +196,30 @@ with **no error** — deliveries are rejected before they're ever logged.
   - Optional tunables (non-secret — set in `wrangler.jsonc` `vars`, or as secrets):
     `HEARTBEAT_MAX_SILENCE_HOURS`, `HEARTBEAT_REALERT_HOURS`, and `SLACK_ALERT_CHANNEL`
     (the alert channel; defaults to `SLACK_DEFAULT_CHANNEL`).
+
+## Troubleshooting: the feed went silent
+Work top-down — the first item is the most common cause and the cheapest to check.
+
+1. **Is an alert actually bound to the webhook?** ⚠️ **#1 cause.** Registering the Generic
+   Webhook (§a) only creates a *destination*; each search/alert must also *deliver* to it:
+   **Alerts → open every _Every Mention_ alert → Delivery method → Generic Webhook → tick your
+   connection → Save.** A silent feed with a healthy `/health` is almost always this. Two traps:
+   the binding lives per-alert (tick it on **all** the alerts you want, not just one), and
+   **re-adding a webhook connection drops the binding**, so always re-check after a re-add.
+2. **Is Meltwater pointed at the right URL?** The UI masks it to `feed.moofer.com/***` and
+   can't be edited — delete + re-add only (§c). Verify it against `MELTWATER_WEBHOOK_URL` in
+   `.dev.vars`. A host/token change silently orphans the old connection.
+3. **Is anything reaching the Worker?** Check Cloudflare — `npx wrangler tail headwater` (live)
+   or the zone's **Analytics → Traffic**. A `403` on `/webhooks/meltwater/*` = wrong/stale
+   token (the path even shows it); **nothing at all** = wrong host, unbound alert, or a
+   disabled `*.workers.dev`. Note a `403` is **not** in `/inspect` (rejected before logging).
+4. **Is the Worker healthy?** `GET /health` → `build` (matches the last deploy?),
+   `postingEnabled: true`, `configOk: true`.
+5. **Are mentions arriving but not posting?** Open `GET /inspect` (behind Cloudflare Access) —
+   read each event's `decision`/`reason` (a filter `dropped` it, `duplicate`, or `slack_error:*`).
+6. **Heartbeat quiet when it shouldn't be?** It measures the newest `webhook_events` row that
+   parsed into a real *mention* (not raw receipts), so probes/health-pings can't mask a stall.
+   It de-dupes via `ops_state`, so a persistent stall pages at most once per re-alert window.
 
 ## Access & security model
 Every endpoint except the two public ones is **fail-closed** — enforced *in the Worker*, so it stays

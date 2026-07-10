@@ -39,7 +39,8 @@ export function decideHeartbeat(p: {
 }
 
 export interface HeartbeatResult extends HeartbeatDecision {
-  latestReceivedAt: number | null;
+  /** Receipt time (epoch ms) of the newest webhook that parsed into a real mention; null if none. */
+  latestMentionAt: number | null;
   thresholdHours: number;
   /** An alert was actually posted to Slack this run. */
   alerted: boolean;
@@ -63,10 +64,10 @@ export async function runHeartbeat(env: Env, now: number): Promise<HeartbeatResu
   const reAlertHours = numEnv(env.HEARTBEAT_REALERT_HOURS, DEFAULT_REALERT_HOURS);
   const ops = new OpsState(env.DB);
 
-  const latest = await new EventLog(env.DB).latestReceivedAt();
+  const latest = await new EventLog(env.DB).latestMentionReceivedAt();
   const lastAlertAt = await ops.getNumber(LAST_ALERT_KEY);
   const d = decideHeartbeat({ latest, now, thresholdHours, reAlertHours, lastAlertAt });
-  const base: HeartbeatResult = { ...d, latestReceivedAt: latest, thresholdHours, alerted: false };
+  const base: HeartbeatResult = { ...d, latestMentionAt: latest, thresholdHours, alerted: false };
 
   if (d.healthy) {
     // Recovered (or never stalled): clear any marker so a future stall alerts immediately.
@@ -88,8 +89,8 @@ function buildAlertText(latest: number | null, ageHours: number | null, threshol
   const lastSeen = latest === null ? "none on record" : (fmtReceivedApprox(latest) ?? new Date(latest).toISOString());
   const ageText = ageHours === null ? "ever (no events on record)" : `${ageHours.toFixed(1)}h`;
   return (
-    `:warning: *Headwater ingestion stalled* — no Meltwater webhook received in ${ageText} ` +
-    `(threshold ${thresholdHours}h). Last event: ${lastSeen}.\n` +
+    `:warning: *Headwater ingestion stalled* — no Meltwater mention received in ${ageText} ` +
+    `(threshold ${thresholdHours}h). Last mention: ${lastSeen}.\n` +
     `Check the Meltwater destination URL/token and <https://feed.moofer.com/health|feed.moofer.com/health> (\`configOk\`).`
   );
 }
