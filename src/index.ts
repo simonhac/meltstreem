@@ -13,6 +13,13 @@ import { runHeartbeat } from "@/lib/heartbeat";
 
 const app = new Hono<{ Bindings: Env }>();
 
+// Never leak a page's URL (which may carry a ?key=) to sites it links out to. Belt-and-suspenders on
+// top of browsers' default query-stripping; largely moot once Cloudflare Access replaces the ?key=.
+app.use("*", async (c, next) => {
+  await next();
+  c.header("Referrer-Policy", "no-referrer");
+});
+
 function checkKey(provided: string | undefined, expected: string | undefined): "ok" | "unconfigured" | "denied" {
   if (!expected) return "unconfigured";
   if (provided && timingSafeEqualStr(provided, expected)) return "ok";
@@ -34,7 +41,7 @@ app.get("/health", async (c) => {
   const showConfigDetail = checkKey(c.req.query("key"), c.env.INSPECT_KEY) === "ok";
   return c.json({
     service: "headwater",
-    build: "headwater-8", // bump on each deploy to confirm the running code
+    build: "headwater-9", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     configOk: config.ok,
