@@ -11,17 +11,22 @@ export interface Env {
   // --- non-secret vars (wrangler.jsonc) ---
   /** "true" to actually post to Slack. Stays "false" until the payload is confirmed + a bot token is wired. */
   POSTING_ENABLED: string;
+  /** Cloudflare Access team domain (e.g. https://team.cloudflareaccess.com) — verifies /inspect+/api JWTs. */
+  ACCESS_TEAM_DOMAIN?: string;
+  /** Cloudflare Access application audience (AUD) tag for the /inspect+/api app. */
+  ACCESS_AUD?: string;
+  /** Local-dev ONLY (set in .dev.vars): "true" bypasses the Access check on /inspect+/api because
+   * `wrangler dev` has no Cloudflare Access in front of it. NEVER set in wrangler.jsonc or prod. */
+  DEV_SKIP_ACCESS?: string;
 
   // --- secrets (.dev.vars locally; `wrangler secret put` in prod) ---
   /** Path token guarding POST /webhooks/meltwater/:token */
   WEBHOOK_SHARED_SECRET?: string;
-  /** Query-key guarding /inspect and /api/webhooks/* */
-  INSPECT_KEY?: string;
   /** Slack bot token (xoxb-…) with chat:write */
   SLACK_BOT_TOKEN?: string;
   /** Default Slack channel id/name for the trial feed */
   SLACK_DEFAULT_CHANNEL?: string;
-  /** Query-key guarding POST /admin/replay (reparse + repost archived events). */
+  /** Bearer token (Authorization: Bearer …) guarding the /admin/* endpoints. */
   REPLAY_KEY?: string;
 
   // --- ingestion heartbeat (all optional; sensible defaults in src/lib/heartbeat.ts) ---

@@ -15,7 +15,7 @@ export interface ConfigCheck {
 /** URL scheme, whitespace, or slashes in a value that is supposed to be a bare path/query token. */
 const TOKEN_CONTAMINATION = /:\/\/|\s|\//;
 
-/** Path/query tokens (WEBHOOK_SHARED_SECRET, INSPECT_KEY, REPLAY_KEY): a bare, guess-resistant string. */
+/** Bare tokens (WEBHOOK_SHARED_SECRET, REPLAY_KEY): a guess-resistant string, not a URL/path. */
 function tokenCheck(name: string, val: string | undefined, min = 16): ConfigCheck {
   if (!val) return { name, ok: false, severity: "error", detail: "missing" };
   // The classic footgun: pasting the whole webhook URL instead of just the token — this value is
@@ -39,7 +39,6 @@ function tokenCheck(name: string, val: string | undefined, min = 16): ConfigChec
 export function validateConfig(env: Env): ConfigCheck[] {
   const checks: ConfigCheck[] = [
     tokenCheck("WEBHOOK_SHARED_SECRET", env.WEBHOOK_SHARED_SECRET),
-    tokenCheck("INSPECT_KEY", env.INSPECT_KEY),
     tokenCheck("REPLAY_KEY", env.REPLAY_KEY),
   ];
 

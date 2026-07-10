@@ -1,9 +1,24 @@
-# Copy to `.dev.vars` for local `wrangler dev`. In prod use `wrangler secret put <NAME>`.
-# Path token guarding POST /webhooks/meltwater/:token  (make it long + random)
+# Copy to `.dev.vars` for local `wrangler dev`. In prod set each with `wrangler secret put <NAME>`.
+# `.dev.vars` is gitignored — never commit real values (this repo is public).
+
+# The auth token embedded in the webhook URL (POST /webhooks/meltwater/<this>). Generate: openssl rand -hex 32
 WEBHOOK_SHARED_SECRET=dev-secret-change-me
-# Query key guarding /inspect and /api/webhooks/*
-INSPECT_KEY=dev-inspect-change-me
-# Slack bot token (xoxb-…) with chat:write — leave blank until ready to actually post
+
+# Bearer token for the /admin/* endpoints (Authorization: Bearer <this>). Generate: openssl rand -hex 32
+REPLAY_KEY=dev-replay-change-me
+
+# Slack bot token (xoxb-…) with chat:write — from your Slack app → OAuth & Permissions. Blank = don't post.
 SLACK_BOT_TOKEN=
-# Default Slack channel id (e.g. C0123ABCD) or #channel-name for the trial feed
+# Slack channel id (e.g. C0123ABCD) — right-click the channel → Copy link → the C0… id. Or #channel-name.
 SLACK_DEFAULT_CHANNEL=
+
+# Cloudflare Access (identifiers, NOT secrets — they appear in Access's public login redirect). Used to
+# verify the Access JWT on /inspect + /api. From Cloudflare Zero Trust:
+#   ACCESS_TEAM_DOMAIN → Settings → Team domain, written as https://<team>.cloudflareaccess.com
+#   ACCESS_AUD         → Access → Applications → your app → Application Audience (AUD) Tag
+ACCESS_TEAM_DOMAIN=https://your-team.cloudflareaccess.com
+ACCESS_AUD=your-application-audience-tag
+
+# Local dev ONLY — `wrangler dev` has no Access in front, so this opens /inspect + /api locally.
+# NEVER set it in prod (keep it out of wrangler.jsonc and `wrangler secret`).
+DEV_SKIP_ACCESS=true
