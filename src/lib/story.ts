@@ -144,4 +144,33 @@ export class StoryStore {
       .bind(JSON.stringify(primary), renderHash, key)
       .run();
   }
+
+  /** Broadcast stories (carry a SimHash) CREATED within the window — the coalesce backfill's
+   * candidate set. Ordered oldest-first so star-clustering anchors on the original card. Note: no
+   * `created_at` index exists (only `updated_at`/`simhash`), so this is a bounded full scan — fine
+   * for a one-off maintenance sweep. */
+  async broadcastStoriesSince(sinceMs: number): Promise<StoryRow[]> {
+    const res = await this.db
+      .prepare(`SELECT * FROM stories WHERE simhash IS NOT NULL AND created_at >= ? ORDER BY created_at ASC`)
+      .bind(sinceMs)
+      .all<StoryRow>();
+    return res.results ?? [];
+  }
+
+  /** Delete a story row (used by the coalesce backfill AFTER its duplicate Slack message is removed). */
+  async deleteStory(key: string): Promise<void> {
+    await this.db.prepare(`DELETE FROM stories WHERE story_key = ?`).bind(key).run();
+  }
+
+  /** Persist a coalesced canonical in one write: the re-resolved primary snapshot, the merged outlet
+   * + matched-brief lists, and the new render hash. Recency is bumped so the hourly heal keeps the
+   * fix rather than reviving a stale render. Used by the coalesce backfill. */
+  async coalesceInto(key: string, primary: unknown, outlets: Outlet[], briefLabels: string[], renderHash: string, now: number): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE stories SET primary_mention_json = ?, outlets_json = ?, brief_labels_json = ?, render_hash = ?, updated_at = ? WHERE story_key = ?`,
+      )
+      .bind(JSON.stringify(primary), JSON.stringify(outlets), JSON.stringify(briefLabels), renderHash, now, key)
+      .run();
+  }
 }
