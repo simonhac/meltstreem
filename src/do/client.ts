@@ -32,6 +32,38 @@ export async function enqueueStationRender(env: Env, code: string, viewerUrl: st
   }
 }
 
+/**
+ * Best-effort SYNCHRONOUS station-name resolve for the ingestion path, capped at `deadlineMs` so a
+ * slow/broken viewer can't stall the queue consumer. Returns the resolved name, or `null` on
+ * timeout / error / missing binding / a deferred render (spacing, budget, backoff) — the caller then
+ * falls back to the neutral masthead + deferred enqueue. When the deadline wins, the DO's `resolveNow`
+ * keeps running server-side and may still name the code for next time. Mirrors the no-throw contract
+ * of {@link enqueueStationRender}.
+ */
+export async function resolveStationNow(
+  env: Env,
+  code: string,
+  viewerUrl: string,
+  deadlineMs: number,
+): Promise<string | null> {
+  if (!env.STATION_RENDERER) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const rpc = stub(env)
+      .resolveNow(code, viewerUrl)
+      .catch((e) => {
+        console.error(`[station-render] resolveNow failed for ${code}: ${String(e)}`);
+        return null;
+      });
+    const timed = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), deadlineMs);
+    });
+    return (await Promise.race([rpc, timed])) ?? null;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /** Kick the drainer to service any backlog (cron backstop). No-op without the binding / on error. */
 export async function pokeStationRender(env: Env): Promise<void> {
   if (!env.STATION_RENDERER) return;

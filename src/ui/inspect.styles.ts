@@ -122,12 +122,6 @@ body {
 }
 
 /* ── Slack renderer (sr-*), copied verbatim from mrtippy ── */
-.sr-section-fields {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 4px 16px;
-}
-.sr-section-field { min-width: 0; }
 .sr-context {
   display: flex;
   align-items: center;
@@ -205,15 +199,25 @@ body {
   margin: 2px 0 8px;
   overflow-wrap: anywhere;
 }
-.sr-section-fields { margin: 6px 0 8px; }
-.att-field-label {
-  font-weight: 700;
-  font-size: 12px;
-  color: var(--text);
-  margin-bottom: 1px;
+/* Mirror Slack's footer: the 16px media glyph sits inline at the START of the meta line and the
+ * long text wraps INTERNALLY (never dropping below the icon). Overrides .sr-context's flex-wrap. */
+.att-footer {
+  margin-top: 6px;
+  overflow-wrap: anywhere;
+  align-items: flex-start;
+  flex-wrap: nowrap;
+  gap: 6px;
 }
-.att-field-value { font-size: 13px; color: var(--text); overflow-wrap: anywhere; }
-.att-footer { margin-top: 6px; overflow-wrap: anywhere; }
+.att-footer .sr-context-item { flex: 1 1 0; min-width: 0; }
+/* Height = the footer line-height so the glyph centres on the FIRST line (contain keeps it 14px wide,
+ * centred vertically). Deliberately independent of the PNG's internal lift — the lift is a Slack-only
+ * nudge (Slack centres footer_icon in a fixed 16px slot); here we have real CSS control. */
+.att-footer-icon {
+  width: 14px;
+  height: 18px;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
 
 /* compact dropped row */
 .drop {

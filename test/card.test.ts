@@ -32,6 +32,14 @@ describe("mrkdwnText", () => {
   it("leaves a lone stray backtick literal", () => {
     expect(mrkdwnText("a ` b")).toBe("a ` b");
   });
+  it("renders a Slack <url|label> link as an anchor (the ↗ go-direct link)", () => {
+    expect(mrkdwnText("Body. <https://abc.net.au/x?a=1&amp;b=2|↗>")).toBe(
+      'Body. <a class="sr-link" href="https://abc.net.au/x?a=1&amp;b=2" target="_blank" rel="noopener noreferrer">↗</a>',
+    );
+  });
+  it("does not linkify a non-http(s) target", () => {
+    expect(mrkdwnText("<javascript:alert(1)|x>")).toBe("<javascript:alert(1)|x>");
+  });
 });
 
 describe("safeUrl", () => {
@@ -53,27 +61,27 @@ describe("renderCardBody", () => {
     color: "#4263eb",
     fallback: "The Australian: Big renewable news",
     author_icon: "https://www.google.com/s2/favicons?sz=64&domain=theaustralian.com.au",
-    author_name: "The Australian",
+    author_name: "The Australian — Judith Sloan",
     title: "Big renewable news",
     title_link: "https://x.example/a",
     text: "The `renewable` rollout and `Ross Garnaut`.",
-    fields: [
-      { title: "Author", value: "Judith Sloan", short: true },
-      { title: "Organisation Brief", value: "Key People", short: true },
-    ],
-    footer: "Wed, 8 Jul 2026, 8:30am AEST  ·  news  ·  😐  ·  480K reach",
-    mrkdwn_in: ["text", "fields"],
+    footer: "Wed, 8 Jul 2026, 8:30am AEST  ·  Brief: Key People 😐  ·  480K reach",
+    footer_icon: "https://feed.moofer.com/icons/media/v1/newspaper.png",
+    mrkdwn_in: ["text"],
   };
 
-  it("renders masthead, headline link, keyword pills, both fields and footer", () => {
+  it("renders masthead+byline, headline link, keyword pills, footer icon and footer", () => {
     const html = renderCardBody(att);
-    expect(html).toContain('<span class="att-masthead">The Australian</span>');
+    expect(html).toContain('<span class="att-masthead">The Australian — Judith Sloan</span>');
     expect(html).toContain('<a class="att-title sr-link" href="https://x.example/a"');
     expect(html).toContain('<code class="sr-inline-code">renewable</code>');
-    expect(html).toContain('<div class="att-field-label">Author</div>');
-    expect(html).toContain('<div class="att-field-label">Organisation Brief</div>');
+    expect(html).toContain(
+      '<img class="att-footer-icon" src="https://feed.moofer.com/icons/media/v1/newspaper.png"',
+    );
+    expect(html).toContain("Brief: Key People");
     expect(html).toContain("480K reach");
     expect(html).toContain('referrerpolicy="no-referrer"');
+    expect(html).not.toContain("att-field-label"); // the two-column fields row is gone
   });
 
   it("renders a plain (non-link) headline when title_link is missing/unsafe", () => {
@@ -99,7 +107,7 @@ describe("renderCardBody", () => {
 
   it("keeps the masthead a plain span when author_link is unsafe", () => {
     const html = renderCardBody({ ...att, author_link: "javascript:alert(1)", title: undefined, title_link: undefined });
-    expect(html).toContain('<span class="att-masthead">The Australian</span>');
+    expect(html).toContain('<span class="att-masthead">The Australian — Judith Sloan</span>');
     expect(html).not.toContain("javascript:");
   });
 

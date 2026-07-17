@@ -134,15 +134,15 @@ describe("highlight", () => {
 });
 
 describe("format", () => {
-  it("builds a classic attachment: logo+masthead, headline link, Author|Brief fields", () => {
+  it("builds a classic attachment: logo+masthead+byline, headline link, brief in footer", () => {
     const { kept } = applyFilters(parseWebhookPayload(payload), cfg);
     const a = buildAttachment(kept[0]!.mention, kept[0]!.brief);
-    expect(a.author_name).toBe("The Australian"); // masthead
+    expect(a.author_name).toBe("The Australian — Judith Sloan"); // masthead + byline
     expect(a.author_icon).toBeTruthy(); // logo favicon
     expect(a.title).toBe("Big renewable news");
     expect(a.title_link).toBe("https://x.example/a");
-    expect(a.fields?.some((f) => f.title === "Author" && f.value === "Judith Sloan")).toBe(true);
-    expect(a.fields?.some((f) => f.title === "Organisation Brief" && f.value === "Key People")).toBe(true);
+    expect(a.footer).toContain("Brief: Key People");
+    expect(a.footer_icon).toContain("https://feed.moofer.com/icons/media/v1/newspaper.png"); // news → newspaper
     expect(a.mrkdwn_in).toContain("text");
   });
 
@@ -157,7 +157,7 @@ describe("format", () => {
     expect(p.attachments[0].fallback).toContain("The Australian");
   });
 
-  it("lists the outlets with reach and appends 'also matched' to the footer", () => {
+  it("lists the outlets with reach and consolidates the matched briefs in the footer", () => {
     const { kept } = applyFilters(parseWebhookPayload(payload), cfg);
     const others = [
       { name: "The Age", url: "https://age.example/b", reach: null },
@@ -166,7 +166,7 @@ describe("format", () => {
     const a = buildAttachment(kept[0]!.mention, kept[0]!.brief, others, ["MPs", "Teals"]);
     expect(a.footer).toMatch(/3 outlets/); // masthead + the two others
     expect(a.footer).toContain("The Age · SMH"); // null-reach outlets: bare names, last
-    expect(a.footer).toContain("also matched MPs, Teals");
+    expect(a.footer).toContain("Briefs: Key People, MPs, Teals");
   });
 });
 

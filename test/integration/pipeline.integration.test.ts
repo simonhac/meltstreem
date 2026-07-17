@@ -234,6 +234,75 @@ describe("processEvent (real D1 + mocked Slack)", () => {
     expect(await count("stories")).toBe(2);
   });
 
+  // The two ABC captures of the same panel audio (from prod) — share a ~24-token verbatim run, so they
+  // clear the phrase near-dup, but ABC 24 is TV and ABC NewsRadio is radio, so they can only fold via
+  // the ABC cross-media waiver, which needs BOTH sourceNames to contain "abc".
+  const ABC_TV_TEXT =
+    ". It really is beyond belief. Just beyond belief. Very big responsibility. I tell you what menses are doing, he'd quit the Liberal Party and join the teals. Like he quit the UAP and founded the Liberals when he saw it dying. James, final comment from you. Menzies forged together the most successful";
+  const ABC_RADIO_TEXT =
+    ". Alright. Just beyond belief. It's a very big responsibility moment. I tell you what Menzies are doing, he'd quit the Liberal Party and join the Teals. Like he quit the UAP and founded the Liberals when he saw a dinosaur. OK, let James speak. James, final comment from you. Menzies forged together";
+  const abcTv = (article: string) => ({
+    type: "Every Mention",
+    providerType: "tveyes_television",
+    title: "Afternoon Briefing - Thu, 16 Jul 2026 16:39:18 +1000",
+    statusLine: "🔊 70k Reach — 😐 Neutral Sentiment",
+    source: "Teals",
+    keywords: "the teals",
+    authorName: "Patricia Karvelas", // a presenter → not station-trusted → the station needs resolving
+    text: ABC_TV_TEXT,
+    links: { article, source: article },
+  });
+  const abcRadio = {
+    type: "Every Mention",
+    providerType: "tveyes_radio",
+    title: "NewsRadio Drive - Thu, 16 Jul 2026 16:42:45 +1000",
+    statusLine: "🔊 616k Reach — 😐 Neutral Sentiment",
+    source: "Teals",
+    keywords: "the teals",
+    authorName: "ABC NewsRadio", // station-like header → authorName-trust, no render needed
+    text: ABC_RADIO_TEXT,
+    links: { article: "https://radio.example/abc-newsradio", source: "https://news.example.test/" },
+  };
+
+  it("broadcast cross-media: resolving the TV station at ingest folds an ABC simulcast into one card (no second notification)", async () => {
+    await env.DB.prepare("DELETE FROM broadcast_stations").run();
+    await env.DB.prepare("DELETE FROM station_names").run();
+    // The TV clip's code is already named in D1 (as a synchronous resolveNow at ingest would have just
+    // done), so resolveBroadcastOutlet names the presenter-headed ABC 24 clip BEFORE its story is created.
+    await env.DB.prepare("INSERT INTO broadcast_stations (doc_id, code, resolved_at) VALUES (?, ?, ?)").bind("DOCTV", "CODETV", RECEIVED_AT).run();
+    await env.DB.prepare("INSERT INTO station_names (code, name, resolved_at, attempts) VALUES (?, ?, ?, 0)").bind("CODETV", "ABC 24", RECEIVED_AT).run();
+
+    const tv = await run("abc-tv", abcTv("https://transition.meltwater.com/paywall/redirect/DOCTV?k=1"));
+    expect(tv.posted).toBe(1);
+    const tvRow = await env.DB.prepare("SELECT primary_mention_json FROM stories").first<{ primary_mention_json: string }>();
+    expect((JSON.parse(tvRow!.primary_mention_json) as { sourceName: string }).sourceName).toBe("ABC 24"); // not the neutral "TV" placeholder
+
+    calls = [];
+    const radio = await run("abc-radio", abcRadio, RECEIVED_AT + 43_000);
+    expect(radio.merged).toBe(1);
+    expect(radio.posted).toBe(0);
+    expect(calls.some((u) => u.includes("chat.update"))).toBe(true); // edited in place…
+    expect(calls.some((u) => u.includes("chat.postMessage"))).toBe(false); // …never a second post/notification
+    expect(await count("stories")).toBe(1);
+    expect(await outletNames()).toEqual(["ABC 24", "ABC NewsRadio"]);
+  });
+
+  it("broadcast cross-media: an unresolved TV station falls back to the neutral masthead and posts separately (pre-fix behavior)", async () => {
+    await env.DB.prepare("DELETE FROM broadcast_stations").run();
+    await env.DB.prepare("DELETE FROM station_names").run();
+    // No cached code and no BROWSER binding in tests → resolveStationNow yields nothing → the clip falls
+    // back to the neutral "TV" masthead, and the cross-media waiver can't fire against "ABC NewsRadio".
+    const tv = await run("abc-tv-x", abcTv("https://radio.example/abc-tv-unresolved"));
+    expect(tv.posted).toBe(1);
+    const tvRow = await env.DB.prepare("SELECT primary_mention_json FROM stories").first<{ primary_mention_json: string }>();
+    expect((JSON.parse(tvRow!.primary_mention_json) as { sourceName: string }).sourceName).toBe("TV");
+
+    const radio = await run("abc-radio-x", abcRadio, RECEIVED_AT + 43_000);
+    expect(radio.posted).toBe(1); // "ABC NewsRadio" vs "TV" → waiver can't fire → separate card
+    expect(radio.merged).toBe(0);
+    expect(await count("stories")).toBe(2);
+  });
+
   it("previews (no post) when POSTING is off — decide() → preview", async () => {
     const summary = await processEvent(
       { ...env, POSTING_ENABLED: "false" },
@@ -246,5 +315,17 @@ describe("processEvent (real D1 + mocked Slack)", () => {
     expect(summary.posted).toBe(0);
     expect(summary.results.some((r) => r.decision === "preview")).toBe(true);
     expect(calls.some((u) => u.includes("chat.postMessage"))).toBe(false);
+  });
+});
+
+describe("StationRenderer.resolveNow (synchronous ingest resolve)", () => {
+  it("returns a cached station name without launching a browser", async () => {
+    await env.DB.prepare("DELETE FROM station_names").run();
+    await env.DB.prepare("INSERT INTO station_names (code, name, resolved_at, attempts) VALUES ('CN','2GB',0,0)").run();
+    const ns = (env as unknown as { STATION_RENDERER: DurableObjectNamespace }).STATION_RENDERER;
+    const stub = ns.get(ns.idFromName("resolve-now-cache")) as unknown as {
+      resolveNow(code: string, url: string): Promise<string | null>;
+    };
+    expect(await stub.resolveNow("CN", "https://viewer.example")).toBe("2GB");
   });
 });
