@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildAttachment, buildStoryAttachment, buildPostPayload, broadcastMediumLabel } from "@/lib/slack/format";
+import { buildAttachment, buildStoryAttachment, buildPostPayload, broadcastMediumLabel, OFFSITE_ARROW } from "@/lib/slack/format";
 import { outletOf } from "@/lib/story";
 import type { NormalizedMention } from "@/lib/meltwater/types";
 import type { BriefRule } from "@/config/feed.config";
@@ -36,15 +36,15 @@ const brief: BriefRule = {
 
 describe("buildAttachment — author icon / masthead", () => {
   it("sets author_icon from a curated source logo when the source name is known", () => {
-    const a = buildAttachment(mention({ url: null, outletUrl: null }), brief);
+    const a = buildAttachment(mention({ url: null, outletUrl: null, author: null }), brief);
     // "The Australian" resolves via the curated SOURCE_LOGOS map even with no URL.
     expect(a.author_icon).toContain("theaustralian.com.au");
-    expect(a.author_name).toBe("The Australian"); // logo present → no emoji prefix
+    expect(a.author_name).toBe("The Australian"); // no byline (author null) and no emoji prefix
   });
 
   it("sets author_icon from the article/outlet domain favicon when the source is unknown", () => {
     const a = buildAttachment(
-      mention({ sourceName: "Random Blog", url: "https://www.randomblog.example/a", outletUrl: null }),
+      mention({ sourceName: "Random Blog", url: "https://www.randomblog.example/a", outletUrl: null, author: null }),
       brief,
     );
     expect(a.author_icon).toContain("randomblog.example");
@@ -63,22 +63,24 @@ describe("buildAttachment — author icon / masthead", () => {
     expect(a.author_icon).toContain("outlethome.example");
   });
 
-  it("leaves author_icon undefined and prefixes a media-type emoji when there is no logo", () => {
+  it("leaves author_icon undefined and shows a bare masthead (no emoji prefix) when there is no logo", () => {
     const a = buildAttachment(
-      mention({ sourceName: "Nowhere Gazette", mediaType: "radio", url: null, outletUrl: null }),
+      mention({ sourceName: "Nowhere Gazette", mediaType: "radio", url: null, outletUrl: null, author: null }),
       brief,
     );
     expect(a.author_icon).toBeUndefined();
-    expect(a.author_name).toBe("📻 Nowhere Gazette"); // radio emoji prefix
+    expect(a.author_name).toBe("Nowhere Gazette"); // medium now lives in the footer icon, not a prefix
+    expect(a.footer_icon).toContain("https://feed.moofer.com/icons/media/v1/radio.png");
   });
 
-  it("falls back to 'Unknown source' when sourceName is null and still emits an emoji prefix", () => {
+  it("falls back to 'Unknown source' when sourceName is null", () => {
     const a = buildAttachment(
-      mention({ sourceName: null, mediaType: null, url: null, outletUrl: null }),
+      mention({ sourceName: null, mediaType: null, url: null, outletUrl: null, author: null }),
       brief,
     );
     expect(a.author_icon).toBeUndefined();
-    expect(a.author_name).toBe("📰 Unknown source"); // null mediaType → default 📰
+    expect(a.author_name).toBe("Unknown source");
+    expect(a.footer_icon).toContain("https://feed.moofer.com/icons/media/v1/newspaper.png"); // null mediaType → newspaper
   });
 });
 
@@ -169,25 +171,25 @@ describe("buildAttachment — collapse a title that just repeats the masthead", 
   });
 });
 
-describe("buildAttachment — fields (Author | Organisation Brief)", () => {
-  it("includes an Author field when author is present", () => {
+describe("buildAttachment — byline in header, brief in footer (no fields row)", () => {
+  it("appends the byline to the masthead with an em-dash and puts the brief in the footer", () => {
     const a = buildAttachment(mention({ author: "Judith Sloan" }), brief);
-    expect(a.fields).toEqual([
-      { title: "Author", value: "Judith Sloan", short: true },
-      { title: "Organisation Brief", value: "Key People", short: true },
-    ]);
+    expect(a.author_name).toBe("The Australian — Judith Sloan");
+    expect(a.footer).toContain("Brief: Key People");
+    expect((a as { fields?: unknown }).fields).toBeUndefined(); // the two-column fields row is gone
   });
 
-  it("emits only the Organisation Brief field when author is absent", () => {
+  it("omits the byline when author is absent, keeping the brief in the footer", () => {
     const a = buildAttachment(mention({ author: null }), brief);
-    expect(a.fields).toEqual([{ title: "Organisation Brief", value: "Key People", short: true }]);
-    expect(a.fields?.some((f) => f.title === "Author")).toBe(false);
+    expect(a.author_name).toBe("The Australian");
+    expect(a.author_name).not.toContain("—");
+    expect(a.footer).toContain("Brief: Key People");
   });
 
-  it("escapes mrkdwn in the author and brief label", () => {
+  it("keeps byline and brief label raw (not mrkdwn-escaped) — header/footer aren't mrkdwn surfaces", () => {
     const a = buildAttachment(mention({ author: "A & B" }), { ...brief, label: "R&D <team>" });
-    expect(a.fields?.find((f) => f.title === "Author")?.value).toBe("A &amp; B");
-    expect(a.fields?.find((f) => f.title === "Organisation Brief")?.value).toBe("R&amp;D &lt;team&gt;");
+    expect(a.author_name).toBe("The Australian — A & B");
+    expect(a.footer).toContain("Brief: R&D <team>");
   });
 });
 
@@ -199,22 +201,22 @@ describe("broadcast safety net (unresolved station never shows a person as the o
     expect(broadcastMediumLabel(null)).toBe("Radio");
   });
 
-  it("keeps the presenter in the Author byline under a neutral masthead (Zann Maxwell case)", () => {
+  it("keeps the presenter as the byline under a neutral masthead (Zann Maxwell case)", () => {
     const a = buildAttachment(
       mention({ sourceName: "Radio", title: "Evenings with Renee Krosch", author: "Zann Maxwell", mediaType: "radio", url: null, outletUrl: null }),
       brief,
     );
-    expect(a.author_name).toBe("📻 Radio"); // medium, not the person
-    expect(a.fields?.find((f) => f.title === "Author")?.value).toBe("Zann Maxwell");
+    expect(a.author_name).toBe("Radio — Zann Maxwell"); // neutral medium masthead + presenter byline
+    expect(a.footer_icon).toContain("https://feed.moofer.com/icons/media/v1/radio.png");
   });
 
-  it("drops the Author byline when it just repeats the headline (host-named show, Tom Elliott case)", () => {
+  it("drops the byline when it just repeats the headline (host-named show, Tom Elliott case)", () => {
     const a = buildAttachment(
       mention({ sourceName: "Radio", title: "Tom Elliott", author: "Tom Elliott", mediaType: "radio", url: null, outletUrl: null }),
       brief,
     );
-    expect(a.author_name).toBe("📻 Radio");
-    expect(a.fields?.some((f) => f.title === "Author")).toBe(false); // no "Tom Elliott" twice
+    expect(a.author_name).toBe("Radio"); // no "Tom Elliott" twice
+    expect(a.author_name).not.toContain("—");
   });
 });
 
@@ -314,31 +316,64 @@ describe("buildAttachment — body text", () => {
   });
 });
 
+describe("buildAttachment — direct (↗) link", () => {
+  const tracking = (real: string) => "https://transition.meltwater.com/redirect?u=" + encodeURIComponent(real);
+
+  it("appends a trailing ↗ link to the direct URL unwrapped from a Meltwater tracking link", () => {
+    const a = buildAttachment(
+      mention({ url: tracking("https://abc.net.au/news/story?a=1&b=2"), snippet: "Some body text." }),
+      brief,
+    );
+    expect(a.title_link).toContain("meltwater.com"); // the title still routes through Meltwater
+    expect(a.text).toContain(`<https://abc.net.au/news/story?a=1&amp;b=2|${OFFSITE_ARROW}>`); // & escaped for mrkdwn
+    expect(a.text!.trimEnd().endsWith(`|${OFFSITE_ARROW}>`)).toBe(true); // trailing
+  });
+
+  it("uses the ↗ link as the whole body when there is no snippet or mentions line", () => {
+    const a = buildAttachment(
+      mention({ title: "No keywords here", url: tracking("https://abc.net.au/x"), snippet: null, matchedKeywords: [] }),
+      brief,
+    );
+    expect(a.text).toBe(`<https://abc.net.au/x|${OFFSITE_ARROW}>`);
+  });
+
+  it("omits the ↗ link when the url is already direct (no tracking redirect)", () => {
+    const a = buildAttachment(mention({ url: "https://abc.net.au/news/story", snippet: "Body." }), brief);
+    expect(a.text).not.toContain("↗");
+  });
+
+  it("omits the ↗ link when the tracking link unwraps to another Meltwater host", () => {
+    const a = buildAttachment(mention({ url: tracking("https://transition.meltwater.com/y"), snippet: "Body." }), brief);
+    expect(a.text).not.toContain("↗");
+  });
+});
+
 describe("buildAttachment — footer", () => {
-  it("includes date · media type · reach, joined with a middot", () => {
+  it("includes date · Brief · reach, joined with a middot (no media-type word)", () => {
     const a = buildAttachment(mention(), brief);
     expect(a.footer).toContain("Wed, 8 Jul 2026, 8:30am AEST");
-    expect(a.footer).toContain("news");
+    expect(a.footer).toContain("Brief: Key People");
     expect(a.footer).toContain("480K reach");
     expect(a.footer).toContain("·");
+    expect(a.footer).not.toContain("news"); // medium is the footer_icon now, not a word
   });
 
-  it("shows a thumbs sentiment marker between the media type and the reach", () => {
+  it("rides the thumbs sentiment marker on the brief bit, before the reach", () => {
     const f = buildAttachment(mention({ sentiment: "positive" }), brief).footer!;
-    expect(f).toContain("👍");
-    expect(f.indexOf("news")).toBeLessThan(f.indexOf("👍"));
+    expect(f).toContain("Brief: Key People 👍");
+    expect(f.indexOf("Key People")).toBeLessThan(f.indexOf("👍"));
     expect(f.indexOf("👍")).toBeLessThan(f.indexOf("480K reach"));
-    expect(buildAttachment(mention({ sentiment: "negative" }), brief).footer).toContain("👎");
-    expect(buildAttachment(mention({ sentiment: "neutral" }), brief).footer).toContain("😐");
+    expect(buildAttachment(mention({ sentiment: "negative" }), brief).footer).toContain("Key People 👎");
+    expect(buildAttachment(mention({ sentiment: "neutral" }), brief).footer).toContain("Key People 😐");
   });
 
-  it("lists every outlet with its own reach (descending) plus 'also matched'", () => {
+  it("lists every outlet with its own reach (descending) and consolidates matched briefs", () => {
     const others = [
       { name: "The Age", url: "https://age.example/b", reach: 40000 },
       { name: "SMH", url: "https://smh.example/c", reach: null }, // null reach → bare name, sorts last
     ];
     const a = buildAttachment(mention(), brief, others, ["MPs", "Teals"]); // masthead reach 480000
-    expect(a.footer).toContain("also matched MPs, Teals");
+    expect(a.footer).toContain("Briefs: Key People, MPs, Teals"); // primary first, plural label
     // combined uppercase, per-outlet lowercase; descending by reach; null-reach outlet bare.
     expect(a.footer).toContain("3 outlets with 520K combined reach: The Australian (480k) · The Age (40k) · SMH");
   });
@@ -387,17 +422,59 @@ describe("buildAttachment — footer", () => {
     expect(a.footer).not.toContain("~");
   });
 
-  it("omits the footer entirely when there is no date, media type, reach, sentiment, receipt, or extras", () => {
+  it("always carries a date (receipt fallback) and the brief, even with no reach or sentiment", () => {
+    // In production the webhook-receipt instant is always passed, so the footer never lacks a date.
+    const receivedAt = Date.parse("2026-07-08T07:40:10+10:00");
     const a = buildAttachment(
       mention({ publishedAt: null, mediaType: null, reach: null, sentiment: null }),
       brief,
+      [],
+      [],
+      receivedAt,
     );
-    expect(a.footer).toBeUndefined();
+    expect(a.footer).toBe("Wed, 8 Jul 2026, ~7:40am AEST  ·  Brief: Key People");
   });
 
   it("always lists 'text' among the mrkdwn_in fields", () => {
     const a = buildAttachment(mention(), brief);
     expect(a.mrkdwn_in).toContain("text");
+  });
+});
+
+describe("buildAttachment — footer_icon (media-type Lucide PNG)", () => {
+  const base = (slug: string) => `https://feed.moofer.com/icons/media/v1/${slug}.png`;
+  const iconOf = (mt: string | null) => buildAttachment(mention({ mediaType: mt }), brief).footer_icon!;
+  it("maps each media type to its Lucide icon URL, defaulting to newspaper", () => {
+    expect(iconOf("radio")).toContain(base("radio"));
+    expect(iconOf("television")).toContain(base("tv"));
+    expect(iconOf("tv")).toContain(base("tv"));
+    expect(iconOf("online_news")).toContain(base("globe"));
+    expect(iconOf("social")).toContain(base("message-circle"));
+    expect(iconOf("news")).toContain(base("newspaper"));
+    expect(iconOf(null)).toContain(base("newspaper"));
+  });
+  it("appends a content-hash cache-buster query (busts Slack's image proxy when icons change)", () => {
+    expect(iconOf("radio")).toMatch(/\/radio\.png\?v=[0-9a-f]{8}$/);
+  });
+});
+
+describe("buildAttachment — brief consolidation", () => {
+  it("uses the singular 'Brief:' for one brief and dedups a repeated primary case-insensitively", () => {
+    const single = buildAttachment(mention(), brief);
+    expect(single.footer).toContain("Brief: Key People");
+    // otherBriefLabels repeats the primary (different case) → collapsed, still singular
+    const deduped = buildAttachment(mention(), brief, [], ["key people"]);
+    expect(deduped.footer).toContain("Brief: Key People");
+    expect(deduped.footer).not.toContain("Briefs:");
+  });
+
+  it("appends the byline after '+ N others' in the masthead for a multi-outlet story", () => {
+    const a = buildAttachment(
+      mention({ sourceName: "Yahoo", author: "Jacob Shteyman" }),
+      brief,
+      [{ name: "The Age", url: "https://age.example/b", reach: 1 }],
+    );
+    expect(a.author_name).toBe("Yahoo + 1 others — Jacob Shteyman");
   });
 });
 

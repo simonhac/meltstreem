@@ -60,4 +60,14 @@ describe("isNearDupPair — cross-media guard", () => {
     const b = side({ mediaType: "tv", station: "9 Melbourne" });
     expect(isNearDupPair(a, b, cfg).match).toBe(true);
   });
+
+  it("does NOT merge cross-media when a station is still the unresolved 'TV' placeholder", () => {
+    // The exact production false-negative: an ABC TV clip whose station hadn't resolved yet was stored
+    // under the neutral `broadcastMediumLabel` ("TV"), which contains no network token, so the ABC
+    // waiver can't fire even against a genuine ABC-radio simulcast. Resolving the name at ingest (before
+    // the story is created) is what removes this precondition.
+    const tv = side({ mediaType: "tv", station: "TV" });
+    const radio = side({ mediaType: "radio", station: "ABC NewsRadio" });
+    expect(isNearDupPair(tv, radio, cfg).match).toBe(false);
+  });
 });

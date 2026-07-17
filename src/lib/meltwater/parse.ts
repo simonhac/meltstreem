@@ -158,6 +158,21 @@ function firstPublisherUrl(urls: (string | null)[]): string | null {
   return null;
 }
 
+/**
+ * The direct publisher article URL behind a Meltwater tracking link — for the card's optional
+ * "go direct" (↗) link, distinct from the tracking link the title uses. Returns null (i.e. "no
+ * distinct direct URL to offer") when the link is already direct, is a bare Meltwater redirect with
+ * no embedded `?u=`, or unwraps to another Meltwater host. `trackingUrl` is the mention's `url`
+ * (the raw `links.article`).
+ */
+export function directArticleUrl(trackingUrl: string | null): string | null {
+  const unwrapped = unwrapTrackingUrl(trackingUrl);
+  if (!unwrapped || unwrapped === trackingUrl) return null; // already direct / nothing embedded
+  const host = hostnameOf(unwrapped);
+  if (!host || isTrackingHost(host)) return null; // unwrapped to another Meltwater host → not useful
+  return unwrapped;
+}
+
 /** Radio/TV — these carry their own station-resolution path in process.ts, so leave them to it. */
 export function isBroadcastMedium(mediaType: string | null): boolean {
   const t = (mediaType ?? "").toLowerCase();

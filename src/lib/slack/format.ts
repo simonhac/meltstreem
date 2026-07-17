@@ -1,8 +1,9 @@
 import type { NormalizedMention } from "@/lib/meltwater/types";
+import { directArticleUrl } from "@/lib/meltwater/parse";
 import type { Outlet } from "@/lib/story";
 import { type BriefRule, DEFAULT_BRIEF_COLOR } from "@/config/feed.config";
 import { keywordsFor } from "@/lib/filter/engine";
-import { sourceLogoUrl, mediaTypeEmoji } from "./icons";
+import { sourceLogoUrl, mediaTypeIconUrl } from "./icons";
 import {
   escapeMrkdwn,
   highlightKeywordsAsCode,
@@ -12,9 +13,10 @@ import {
 
 /**
  * A Streem-style card, built as a CLASSIC (legacy-field) Slack attachment — not blocks-in-attachment.
- * Classic fields map 1:1 onto Streem's layout: author_icon+author_name = logo+masthead,
- * title+title_link = the headline link, text = the excerpt (with keyword pills), fields = the
- * Author | Organisation Brief columns, footer = the meta line, color = the left bar.
+ * Classic fields map 1:1 onto Streem's layout: author_icon+author_name = logo+masthead (with the
+ * byline appended), title+title_link = the headline link, text = the excerpt (with keyword pills),
+ * footer = the meta line (media icon + date · Brief(s) + sentiment · reach), footer_icon = the
+ * Lucide media-type glyph, color = the left bar.
  */
 export interface SlackAttachment {
   color: string;
@@ -27,8 +29,9 @@ export interface SlackAttachment {
   title?: string;
   title_link?: string;
   text?: string;
-  fields?: { title: string; value: string; short: boolean }[];
   footer?: string;
+  /** Small (16px) icon rendered at the start of the footer — the media-type Lucide PNG. */
+  footer_icon?: string;
   mrkdwn_in: string[];
 }
 
@@ -39,6 +42,12 @@ export interface SlackPostPayload {
   unfurl_links: false;
   unfurl_media: false;
 }
+
+/** The trailing "go direct" glyph: U+2197 (↗) + U+FE0E text-presentation selector. The selector
+ * stops Slack rendering it as the chunky `:arrow_upper_right:` emoji — it stays a demure text arrow
+ * (blue, since it's a link label). Kept as explicit escapes so the invisible selector is visible in
+ * source. Exported so tests assert against the exact glyph. */
+export const OFFSITE_ARROW = "\u2197\uFE0E";
 
 const DATE_PARTS = { weekday: "short", day: "numeric", month: "short", year: "numeric", hour: "numeric", minute: "2-digit", hour12: true } as const;
 // Render the wall-clock time in the source's own offset (read UTC parts off a shifted date).
@@ -175,9 +184,10 @@ export function sameText(a: string, b: string): boolean {
 
 /**
  * Build the Streem-style classic attachment for one mention. `otherOutlets` are additional outlets
- * that carried the same (syndicated) story; `otherBriefLabels` are the non-primary Organisation
- * Briefs that also matched it — both appended to the footer. `receivedAtMs` is the webhook-receipt
- * instant, used only as an approximate ("~") footer date when the mention has no better timestamp.
+ * that carried the same (syndicated) story (folded into the footer reach + the masthead count);
+ * `otherBriefLabels` are the non-primary Organisation Briefs that also matched it (folded into the
+ * footer's consolidated "Brief(s): …" list). `receivedAtMs` is the webhook-receipt instant, used
+ * only as an approximate ("~") footer date when the mention has no better timestamp.
  */
 export function buildAttachment(
   m: NormalizedMention,
@@ -215,18 +225,28 @@ export function buildAttachment(
     text = buildMentionsLine(fullText, kws) ?? undefined;
   }
 
-  // Author | Organisation Brief columns. Skip the Author byline when it just repeats the headline or
-  // the masthead — happens for a host-named broadcast show (a "Tom Elliott" segment) where the
-  // presenter already appears as the title/heading and the masthead is the neutral medium label.
-  const fields: { title: string; value: string; short: boolean }[] = [];
-  if (m.author && !sameText(m.author, title) && !sameText(m.author, masthead)) {
-    fields.push({ title: "Author", value: escapeMrkdwn(m.author), short: true });
+  // Optional "go direct" link: the publisher's own article URL, unwrapped from the Meltwater tracking
+  // link the title uses — so readers can bypass Meltwater. Only when a distinct direct URL exists
+  // (web/online items; broadcast clips usually have none). Rendered as a trailing ↗ in the body,
+  // the one region Slack renders mrkdwn links in (footers are plain text).
+  const direct = directArticleUrl(m.url);
+  if (direct) {
+    const arrow = `<${escapeMrkdwn(direct)}|${OFFSITE_ARROW}>`;
+    text = text ? `${text} ${arrow}` : arrow;
   }
-  fields.push({ title: "Organisation Brief", value: escapeMrkdwn(brief.label), short: true });
 
-  // footer: date · media type · sentiment · reach (+ "also matched …"). Plain text — Slack attachment
-  // footers don't render mrkdwn, so no pills. For a multi-outlet story the single reach is replaced by
-  // the outlet count + summed reach, then every outlet listed with its OWN reach, descending.
+  // Byline for the header masthead ("… — Leith Forrest"). Skip when the author just repeats the
+  // headline or the masthead — a host-named broadcast show (a "Tom Elliott" segment) where the
+  // presenter already appears as the title/heading, or an outlet whose byline equals its own name.
+  // Kept RAW (not mrkdwn-escaped) to match the masthead: author_name isn't in `mrkdwn_in`, and the
+  // /inspect mirror HTML-escapes it itself.
+  const byline =
+    m.author && !sameText(m.author, title) && !sameText(m.author, masthead) ? ` — ${m.author}` : "";
+
+  // footer: [media icon] date · Brief(s) + sentiment · reach. The media type shows as the footer_icon
+  // (a Lucide glyph), not a word. Plain text — Slack attachment footers don't render mrkdwn, so no
+  // pills. For a multi-outlet story the single reach is replaced by the outlet count + summed reach,
+  // then every outlet listed with its OWN reach, descending.
   let reachBit: string | null;
   if (otherOutlets.length) {
     const all = [{ name: masthead, reach: m.reach }, ...otherOutlets.map((o) => ({ name: o.name, reach: o.reach }))].sort(
@@ -260,28 +280,31 @@ export function buildAttachment(
     fmtFriendly(broadcastAirtime(m.title)) ??
     fmtReceivedApprox(receivedAtMs);
 
-  const footerBits = [
-    footerDate,
-    m.mediaType,
-    sentimentEmoji(m.sentiment),
-    reachBit,
-  ].filter((x): x is string => !!x);
-  if (otherBriefLabels.length) footerBits.push(`also matched ${otherBriefLabels.join(", ")}`);
+  // Consolidated Organisation Brief(s), primary first, case-insensitive dedup — the old separate
+  // "also matched …" tail folds in here. The sentiment marker rides on this bit ("Brief: Teals 😐").
+  const briefs = [brief.label, ...otherBriefLabels].reduce<string[]>((acc, l) => {
+    if (!acc.some((x) => x.toLowerCase() === l.toLowerCase())) acc.push(l);
+    return acc;
+  }, []);
+  const sentiment = sentimentEmoji(m.sentiment);
+  const briefBit = `${briefs.length > 1 ? "Briefs" : "Brief"}: ${briefs.join(", ")}${sentiment ? ` ${sentiment}` : ""}`;
 
-  // Masthead shows the count of the other outlets — "9 Brisbane + 4 others". Stays inside the
-  // attachment and keeps the logo (author_icon); classic-attachment author_name is rendered fully bold,
-  // so "+ N others" is bold too (no partial-unbold without leaving the block / dropping the image).
-  const headMasthead = otherOutlets.length ? `${masthead} + ${otherOutlets.length} others` : masthead;
+  const footerBits = [footerDate, briefBit, reachBit].filter((x): x is string => !!x);
+
+  // Masthead: "9 Brisbane + 4 others — Jacob Shteyman" — outlet[ + N others][ — byline]. Keeps the
+  // logo (author_icon); classic-attachment author_name is rendered fully bold, so both the "+ N others"
+  // count and the byline are bold too (no partial-unbold without leaving the block / dropping the image).
+  const headMasthead = `${otherOutlets.length ? `${masthead} + ${otherOutlets.length} others` : masthead}${byline}`;
   const logo = sourceLogoUrl(m.sourceName, m.outletUrl ?? m.url);
   const att: SlackAttachment = {
     color: briefColor(brief),
     fallback: titleRepeatsMasthead ? masthead : `${masthead}: ${title}`,
-    author_name: logo ? headMasthead : `${mediaTypeEmoji(m.mediaType)} ${headMasthead}`,
+    author_name: headMasthead,
     // Keep `title` in its original position for the common (non-repeat) case so the attachment hash
     // of every existing card stays stable — only the collapsed broadcast cards should re-render.
     ...(titleRepeatsMasthead ? {} : { title }),
-    fields,
-    mrkdwn_in: ["text", "fields"],
+    footer_icon: mediaTypeIconUrl(m.mediaType),
+    mrkdwn_in: ["text"],
   };
   if (logo) att.author_icon = logo;
   if (m.url) {

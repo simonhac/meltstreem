@@ -15,7 +15,7 @@ import { stationCodeFor, viewerUrlForRaw } from "@/lib/meltwater/station-resolve
 import { stationNameForCode, upsertStationName } from "@/lib/meltwater/stations";
 import { looksLikePerson } from "@/lib/meltwater/outlets";
 import { broadcastMediumLabel } from "@/lib/slack/format";
-import { enqueueStationRender } from "@/do/client";
+import { enqueueStationRender, resolveStationNow } from "@/do/client";
 import { decide } from "@/lib/decide";
 import { sha256Hex } from "@/lib/ids";
 
@@ -23,6 +23,11 @@ import { sha256Hex } from "@/lib/ids";
 const SYNDICATION_WINDOW_MS = 72 * 60 * 60 * 1000;
 
 const nd = feedConfig.nearDuplicate;
+
+/** Best-effort synchronous station-name render budget at ingest (ms). A healthy Meltwater viewer
+ * titles in ~1-2s; past this we fall back to the neutral masthead + deferred renderer so a slow or
+ * broken viewer never stalls the queue consumer. */
+const STATION_RESOLVE_DEADLINE_MS = 9000;
 
 /** Does this media type opt into SimHash near-duplicate merging (radio/TV)? */
 function isBroadcast(mediaType: string | null): boolean {
@@ -56,16 +61,18 @@ export interface ProcessSummary {
 
 
 /**
- * Resolve a broadcast item's station WITHOUT rendering (rendering is deferred to the StationRenderer
- * DO, which drains serially under the free-tier limits). In order:
- *   1. D1 code→name cache — a station named earlier by any means wins.
+ * Resolve a broadcast item's station. In order:
+ *   1. D1 code→name cache — a station named earlier by any means wins (no browser).
  *   2. authorName-trust — a station-like header IS the station; keep it and seed the map so every
  *      future item of this station (and the redecode backfill) resolves for free, render-free.
- *   3. otherwise it's a presenter's name → don't show a person as the outlet: move them to the byline,
- *      show a neutral medium masthead, and enqueue the code for the background renderer.
+ *   3. a presenter's name with no known station → on the live post/merge path (`sync=true`) try a
+ *      best-effort SYNCHRONOUS render (via the StationRenderer DO, so budget/spacing/backoff stay
+ *      centralized) so the near-dup decision sees the real outlet; on a miss (or when `sync=false`)
+ *      fall back to moving the presenter to the byline, a neutral medium masthead, and enqueuing the
+ *      code for the deferred background renderer.
  * Best-effort; a resolution failure just leaves the safety-net card, never throws into the pipeline.
  */
-async function resolveBroadcastOutlet(env: Env, mention: NormalizedMention, now: number): Promise<void> {
+async function resolveBroadcastOutlet(env: Env, mention: NormalizedMention, now: number, sync = false): Promise<void> {
   const codeInfo = await stationCodeFor(env, mention.raw); // {docId, code} | null (caches docId→code)
   const code = codeInfo?.code ?? null;
 
@@ -83,10 +90,22 @@ async function resolveBroadcastOutlet(env: Env, mention: NormalizedMention, now:
     return;
   }
 
-  // 3. A presenter's name with no known station → safety net + queue the code for the serial renderer.
+  // 3. A presenter's name with no known station. On the live post/merge path (`sync`), try a
+  //    best-effort SYNCHRONOUS render first, so the near-dup decision below sees the real outlet. The
+  //    candidate side reads the story's FROZEN sourceName, so an ABC TV↔radio simulcast only folds if
+  //    the name is resolved BEFORE the story row is created — resolving it here (usually seconds) is
+  //    what prevents a second, separately-notified card. On a miss (budget/spacing/slow viewer) fall
+  //    back to the neutral masthead + deferred renderer, exactly as before.
+  const url = viewerUrlForRaw(mention.raw);
+  if (sync && code && url) {
+    const name = await resolveStationNow(env, code, url, STATION_RESOLVE_DEADLINE_MS);
+    if (name) {
+      promoteStation(mention, name);
+      return;
+    }
+  }
   if (header && !mention.author) mention.author = header;
   mention.sourceName = broadcastMediumLabel(mention.mediaType);
-  const url = viewerUrlForRaw(mention.raw);
   if (code && url) await enqueueStationRender(env, code, url);
 }
 
@@ -186,7 +205,7 @@ export async function processEvent(
 
     // A url-bearing broadcast we're actually about to post/merge still needs its station for the card
     // (`buildAttachment` below). Duplicates skip this — their card is only a debug preview.
-    if (broadcast && mention.url && !isSeen) await resolveBroadcastOutlet(env, mention, now);
+    if (broadcast && mention.url && !isSeen) await resolveBroadcastOutlet(env, mention, now, true);
 
     const channel = brief.channel ?? env.SLACK_DEFAULT_CHANNEL ?? "";
     const blocks = buildAttachment(mention, brief, [], [], now); // stored on DocResult for the /inspect preview

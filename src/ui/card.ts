@@ -31,7 +31,18 @@ export function escHtml(raw: string): string {
  * minimal balanced pair (matching how Slack itself pairs backticks).
  */
 export function mrkdwnText(alreadyEscaped: string): string {
-  return alreadyEscaped.replace(/`([^`]+)`/g, '<code class="sr-inline-code">$1</code>');
+  return (
+    alreadyEscaped
+      // Slack link syntax <url|label> → anchor (e.g. the trailing ↗ "go direct" link). The url is
+      // already &<>-escaped (attribute-safe) so we don't re-escape; only http(s) matches (never
+      // javascript:), and the quote is hardened defensively. Runs before the pill pass.
+      .replace(
+        /<(https?:\/\/[^|>\s]+)\|([^>]*)>/g,
+        (_m, url, label) =>
+          `<a class="sr-link" href="${url.replace(/"/g, "&quot;")}" target="_blank" rel="noopener noreferrer">${label}</a>`,
+      )
+      .replace(/`([^`]+)`/g, '<code class="sr-inline-code">$1</code>')
+  );
 }
 
 /** Allow only http/https URLs into href/src; returns an escaped URL or null. */
@@ -88,23 +99,15 @@ export function renderCardBody(att: SlackAttachment): string {
   // Excerpt: already &<>-escaped mrkdwn — only pill-transform, never re-escape.
   const text = att.text ? `<div class="att-text">${mrkdwnText(att.text)}</div>` : "";
 
-  // Author | Organisation Brief grid. Values already escaped → mrkdwnText passthrough.
-  const fields =
-    att.fields && att.fields.length
-      ? `<div class="sr-section-fields">${att.fields
-          .map(
-            (f) =>
-              `<div class="sr-section-field"><div class="att-field-label">${escHtml(
-                f.title,
-              )}</div><div class="att-field-value">${mrkdwnText(f.value)}</div></div>`,
-          )
-          .join("")}</div>`
-      : "";
-
-  // Footer meta line (context block).
+  // Footer meta line (context block), led by the media-type icon (footer_icon), mirroring Slack's
+  // 16px footer glyph. The brief and byline now live in att.footer / att.author_name respectively.
+  const footerIconUrl = safeUrl(att.footer_icon);
+  const footerIcon = footerIconUrl
+    ? `<img class="att-footer-icon" src="${footerIconUrl}" alt="" loading="lazy" referrerpolicy="no-referrer">`
+    : "";
   const footer = att.footer
-    ? `<div class="sr-context att-footer"><span class="sr-context-item">${escHtml(att.footer)}</span></div>`
+    ? `<div class="sr-context att-footer">${footerIcon}<span class="sr-context-item">${escHtml(att.footer)}</span></div>`
     : "";
 
-  return `<div class="att-main">${head}${title}${text}${fields}${footer}</div>`;
+  return `<div class="att-main">${head}${title}${text}${footer}</div>`;
 }

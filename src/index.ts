@@ -19,6 +19,7 @@ import { eventId, timingSafeEqualStr } from "@/lib/ids";
 import { renderInspectPage } from "@/ui/inspect";
 import { validateConfig, summarizeConfig } from "@/lib/config/validate";
 import { runHeartbeat } from "@/lib/heartbeat";
+import { MEDIA_ICON_PNG } from "@/assets/mediaIcons";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -99,7 +100,7 @@ app.get("/health", async (c) => {
   const config = summarizeConfig(validateConfig(c.env));
   return c.json({
     service: "headwater",
-    build: "headwater-13", // bump on each deploy to confirm the running code
+    build: "headwater-14", // bump on each deploy to confirm the running code
     postingEnabled: c.env.POSTING_ENABLED === "true",
     events: count,
     drift, // { errors, unposted } over the last 7 days; null until the DB is migrated
@@ -319,6 +320,21 @@ const stationsPage = async (c: Context<{ Bindings: Env }>) => {
 };
 app.get("/stations", stationsPage);
 app.get("/inspect/stations", stationsPage);
+
+// --- media-type footer icons (Lucide PNGs, base64 in @/assets/mediaIcons). PUBLIC: Slack's image
+// proxy fetches these unauthenticated for the attachment `footer_icon`, so this route is NOT behind
+// Access. Versioned path (v1) so a future icon change gets a fresh URL past Slack's aggressive
+// image-proxy cache; immutable long-cache since bytes never change under a given version. ---
+app.get("/icons/media/v1/:name", (c) => {
+  const slug = c.req.param("name").replace(/\.png$/, "");
+  const b64 = MEDIA_ICON_PNG[slug];
+  if (!b64) return c.notFound();
+  const bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+  return new Response(bytes, {
+    status: 200,
+    headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=31536000, immutable" },
+  });
+});
 
 app.get("/inspect", async (c) => {
   if (!(await accessOk(c.env, c.req.header("cf-access-jwt-assertion")))) return c.text("forbidden", 403);

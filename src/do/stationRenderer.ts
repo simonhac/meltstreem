@@ -99,6 +99,51 @@ export class StationRenderer extends DurableObject<Env> {
     };
   }
 
+  /**
+   * Best-effort SYNCHRONOUS resolve for the ingestion path: name a station NOW so the near-dup
+   * decision (which reads the story's frozen `sourceName`) sees the real outlet instead of the neutral
+   * "TV"/"Radio" placeholder — this is what lets an ABC TV↔radio simulcast fold in place instead of
+   * posting (and notifying) a second card. All browser launches stay here, sharing the same
+   * launch-spacing / daily-budget / 429-backoff coordination as the background drain, so this can never
+   * re-introduce the concurrent-launch failures the DO exists to prevent.
+   *
+   * Returns the resolved name, or `null` when it can't resolve WITHOUT blocking — already draining, no
+   * `BROWSER` binding, budget spent, launch-spaced, in backoff, or the render yielded no title. On
+   * `null` the caller falls back to the neutral masthead + a deferred `enqueue` (today's behavior). A
+   * code named here is also dropped from `render_queue` so the background drain won't redo it.
+   */
+  async resolveNow(code: string, viewerUrl: string): Promise<string | null> {
+    // Already named (a sibling authorName-trust, or an earlier render) → free, no browser.
+    const known = await stationNameForCode(this.env.DB, code);
+    if (known) return known;
+    if (!this.env.BROWSER) return null;
+    // Don't contend with an in-progress drain, and don't block on launch spacing / backoff / budget —
+    // any of those means "let the background drain handle it" so ingestion stays responsive.
+    if (this.draining) return null;
+    if ((await this.budgetRemainingMs()) <= 0) return null;
+
+    const acq = await this.acquireBrowser();
+    if ("defer" in acq) return null; // launch-spaced or in 429 backoff → defer to the background drain
+    const browser = acq.browser;
+
+    const start = Date.now();
+    try {
+      const page = await browser.newPage();
+      const title = await renderTitleOnPage(page, viewerUrl).catch(() => null);
+      const name = stationNameFromTitle(title);
+      if (name) {
+        await upsertStationName(this.env.DB, code, name, Date.now(), 1); // count this attempt
+        await this.del(code); // resolved inline → drop any queued row so the drain skips it
+      }
+      await page.close().catch(() => {});
+      return name;
+    } finally {
+      // close() (not disconnect()) — a disconnected browser keeps billing idle time; see drain().
+      await browser.close().catch(() => {});
+      await this.addBudget(Date.now() - start);
+    }
+  }
+
   /** Arm the alarm for `at` (never sooner than launch spacing). Moves an existing LATER alarm earlier
    * so a new enqueue can't be stuck behind a "resume tomorrow" (budget-deferred) alarm. */
   private async ensureAlarm(at: number): Promise<void> {
