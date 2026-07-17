@@ -19,6 +19,6 @@ archived verbatim in `webhook_events.raw_json`, so the feed can be reparsed/back
 - Tuning surface: `src/config/feed.config.ts` (briefs, keywords, source filters).
 - Persistence: D1 (`migrations/`), accessed via `src/lib/store/*` and `src/lib/story.ts`.
 - Local dev: `pnpm dev` (wrangler), `pnpm test` (vitest), `pnpm typecheck` (tsc).
-- Deploy: `pnpm deploy`. Secrets via `.dev.vars` (local) / `wrangler secret put` (prod) — never commit real secrets.
+- Deploy: `pnpm run deploy` (use `run` — bare `pnpm deploy` invokes pnpm's built-in deploy and fails). Secrets via `.dev.vars` (local) / `wrangler secret put` (prod) — never commit real secrets.
 
 See `README.md` for setup, config, and deploy details.

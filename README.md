@@ -122,7 +122,7 @@ npx wrangler secret put SLACK_DEFAULT_CHANNEL   # channel id, e.g. C0123ABCD —
 npx wrangler secret put ACCESS_TEAM_DOMAIN      # https://<team>.cloudflareaccess.com — Zero Trust → Settings
 npx wrangler secret put ACCESS_AUD              # Access → Applications → your app → Application Audience (AUD) Tag
 
-pnpm deploy                                     # → your custom domain (workers.dev is disabled)
+pnpm run deploy                                 # → your custom domain (workers.dev is disabled)
 ```
 The last two secrets come from the Cloudflare Access setup — see [Access & security model](#access--security-model),
 which also explains why `/inspect` and `/admin/*` are **non-functional until you configure it**.
@@ -194,7 +194,7 @@ known-correct URL).
 1. Create a Slack app → add bot scope `chat:write` (optionally `chat:write.public`) → install → copy the `xoxb-…` token.
 2. Create the channel and `/invite` the bot.
 3. `wrangler secret put SLACK_BOT_TOKEN` and `SLACK_DEFAULT_CHANNEL` (the channel id, e.g. `C0123ABCD`).
-4. Set `"POSTING_ENABLED": "true"` in `wrangler.jsonc` and `pnpm deploy`.
+4. Set `"POSTING_ENABLED": "true"` in `wrangler.jsonc` and `pnpm run deploy`.
 
 ## Monitoring
 Two guardrails exist because a webhook-secret mismatch (or a stalled upstream) can silence the feed
